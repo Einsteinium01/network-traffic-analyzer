@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-browser": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/curated/agent-browser/SKILL.md",
+      "computedHash": "ec6af8731a13045ec5cf86d7b4cb45efc3013eb0ac8a57e8b5cb13c31f469e91"
+    },
+    "api-audit": {
+      "source": "briiirussell/cybersecurity-skills",
+      "sourceType": "github",
+      "skillPath": "skills/api-audit/SKILL.md",
+      "computedHash": "7eefd82c5cbc7c87c3ec93da3cbf5e86c2f3eb152e1c3e8e505ec6ad2b4ac9df"
+    },
+    "architecture-diagram": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/curated/architecture-diagram/SKILL.md",
+      "computedHash": "850e5b0dbcad151604317d153c15cf951fd5caea271fa64a5d85c46219cd90c8"
+    },
+    "dependency-audit": {
+      "source": "briiirussell/cybersecurity-skills",
+      "sourceType": "github",
+      "skillPath": "skills/dependency-audit/SKILL.md",
+      "computedHash": "06348a45594e8de40f606a61641a49e5d4e40b3bf9a211d6d17cf720bfe2400a"
+    },
+    "exploratory-data-analysis": {
+      "source": "K-Dense-AI/scientific-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/exploratory-data-analysis/SKILL.md",
+      "computedHash": "a2d7a7aedc5a095c89b5e54a4332e2bd82a4c46b7d28914d16e6b170ff394627"
+    },
+    "owasp-audit": {
+      "source": "briiirussell/cybersecurity-skills",
+      "sourceType": "github",
+      "skillPath": "skills/owasp-audit/SKILL.md",
+      "computedHash": "bf18262a2bef3508e4078b7726c1cfdbfd4c17926e3039fea1ab4432f9184e05"
+    },
+    "react": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/mine/react/SKILL.md",
+      "computedHash": "0e29837d3ea458ddf0bdea2d9e9209b31a92c131483c2f2fc3b75f13f3dfa246"
+    },
+    "scikit-learn": {
+      "source": "K-Dense-AI/scientific-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/scikit-learn/SKILL.md",
+      "computedHash": "d682ad1b640328ff0e66e319a73222fa34c2b71b8df6181a7545e70accf779f2"
+    },
+    "systematic-debugging": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/curated/systematic-debugging/SKILL.md",
+      "computedHash": "a13b7c3814e67d15f737886044c823e560e460900f86dae2587ebdc6b83a8052"
+    },
+    "testing-boss": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/mine/testing-boss/SKILL.md",
+      "computedHash": "51fb79acd8eb022863ee9cd0d3e326e9ea7a5c02775a54dbaa5b46b4839c3a27"
+    },
+    "threat-modeling": {
+      "source": "briiirussell/cybersecurity-skills",
+      "sourceType": "github",
+      "skillPath": "skills/threat-modeling/SKILL.md",
+      "computedHash": "674297132b64b0bbe6f90ebd0995e6571244e6b8d7d7f1d72f7bf4ea346227f7"
+    },
+    "ui-craft": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/mine/ui-craft/SKILL.md",
+      "computedHash": "7fef4022f3fae7d22040bb334fb614adf8670cfe797a0c74bc257bf7a61da58e"
+    },
+    "verification-before-completion": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/curated/verification-before-completion/SKILL.md",
+      "computedHash": "d70f1880573d5c55507a4eca2e567fb8274e1870e4796b956fc1acb893638cb0"
+    }
+  }
+}

@@ -32,13 +32,6 @@ Do NOT build everything at once.
 
 Break the project into independent phases.
 
-After completing each phase:
-
-* Explain what was implemented.
-* Explain why it was implemented.
-* Explain how it works.
-* Wait for my confirmation before moving to the next phase.
-
 Never skip phases.
 
 ---
@@ -185,8 +178,6 @@ Follow PEP8.
 Use comments only where useful.
 
 Split code into modules.
-
-Avoid one huge Python file.
 
 Every function should have a single responsibility.
 
