@@ -152,7 +152,7 @@ class PacketSniffer:
         self._thread.start()
         logger.info(f"PacketSniffer started in [{self.active_mode.upper()}] mode.")
 
-    def stop(self, timeout: float = 2.0) -> None:
+    def stop(self, timeout: float = 0.2) -> None:
         """Stop packet capture thread."""
         if not self._running:
             return
@@ -430,4 +430,5 @@ class PacketSniffer:
             }
 
             self._process_packet_dict(pkt_dict)
-            time.sleep(random.uniform(0.05, 0.2))  # ~5-20 packets/sec
+            if self._stop_event.wait(timeout=random.uniform(0.05, 0.15)):
+                break

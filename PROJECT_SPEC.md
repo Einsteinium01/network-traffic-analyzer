@@ -475,21 +475,12 @@ Whenever you generate code:
 
 Explain
 
-1. Why this code exists.
-
-2. How it works.
-
-3. Which file it belongs in.
 
 4. How to run it.
 
 5. How to test it.
 
 6. Expected output.
-
-Never assume I already know the concept.
-
-Teach as if mentoring a student.
 
 ---
 

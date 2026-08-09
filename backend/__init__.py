@@ -1,1 +1,5 @@
-"""Flask backend package (implemented in Phase 6)."""
+"""
+backend package
+===============
+Contains Detection Engine, Flask web application, REST APIs, and SocketIO handlers.
+"""

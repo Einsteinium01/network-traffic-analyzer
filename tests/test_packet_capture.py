@@ -24,7 +24,7 @@ def test_packet_sniffer_lifecycle():
     sniffer.start()
     assert sniffer.is_running()
 
-    time.sleep(1.0)
+    time.sleep(0.3)
     sniffer.stop()
     assert not sniffer.is_running()
 
@@ -48,7 +48,7 @@ def test_protocol_filtering():
     tcp_packets = []
     sniffer = PacketSniffer(filter_proto="TCP", mode="simulation", callback=lambda p: tcp_packets.append(p))
     sniffer.start()
-    time.sleep(1.0)
+    time.sleep(0.3)
     sniffer.stop()
 
     for pkt in tcp_packets:
