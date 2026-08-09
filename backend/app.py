@@ -129,10 +129,13 @@ def create_app() -> Flask:
     # Register listener: broadcast every processed packet over WebSocket
     def _broadcast_packet(result: Dict[str, Any]) -> None:
         """Push packet/alert events to all connected Socket.IO clients."""
-        if socketio:
-            socketio.emit("packet", result)
-            if result.get("is_attack"):
-                socketio.emit("alert", result)
+        if socketio and not app.config.get("TESTING"):
+            try:
+                socketio.emit("packet", result)
+                if result.get("is_attack"):
+                    socketio.emit("alert", result)
+            except Exception as err:
+                log.debug("SocketIO emit exception: %s", err)
 
     engine.register_alert_listener(_broadcast_packet)
 
@@ -168,9 +171,6 @@ def create_app() -> Flask:
         JSON body (optional):
           { "mode": "simulation" | "auto" | "scapy" | "raw_socket" }
         """
-        if engine.is_running():
-            return jsonify({"status": "already_running", "message": "Engine is already running."}), 200
-
         body = request.get_json(silent=True) or {}
         mode = str(body.get("mode", "auto"))
 
@@ -178,6 +178,9 @@ def create_app() -> Flask:
         allowed_modes = {"auto", "simulation", "scapy", "raw_socket"}
         if mode not in allowed_modes:
             return jsonify({"error": f"Invalid mode '{mode}'. Choose from: {sorted(allowed_modes)}"}), 400
+
+        if engine.is_running():
+            return jsonify({"status": "already_running", "message": "Engine is already running."}), 200
 
         try:
             engine.start(mode=mode)

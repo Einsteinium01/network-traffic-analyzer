@@ -99,6 +99,12 @@ class DetectionEngine:
             )
         try:
             model = joblib.load(self.model_path)
+            # Ensure real-time inference uses CPU to prevent CUDA context locks in background threads
+            if hasattr(model, "set_params"):
+                try:
+                    model.set_params(device="cpu")
+                except Exception:
+                    pass
             logger.info(f"Loaded ML Model from {self.model_path.name}")
             return model
         except Exception as e:

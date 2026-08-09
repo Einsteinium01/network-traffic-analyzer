@@ -11,19 +11,17 @@ Applied skills:
 
 import time
 import pytest
-from backend.app import create_app
+from backend.app import create_app, engine
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def client():
     app = create_app()
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c
-        # Ensure engine is stopped after each test that may start it
-        from backend import app as app_module
-        if app_module.engine and app_module.engine.is_running():
-            app_module.engine.stop()
+        if engine and engine.is_running():
+            engine.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +39,7 @@ def test_root_health_check(client):
 # /api/v1/status — before engine starts
 # ---------------------------------------------------------------------------
 def test_status_before_start(client):
+    client.post("/api/v1/stop")
     r = client.get("/api/v1/status")
     assert r.status_code == 200
     data = r.get_json()
@@ -53,14 +52,15 @@ def test_status_before_start(client):
 # /api/v1/start → /api/v1/status → /api/v1/stop lifecycle
 # ---------------------------------------------------------------------------
 def test_start_stop_lifecycle(client):
+    client.post("/api/v1/stop")
     # Start
     r = client.post("/api/v1/start", json={"mode": "simulation"})
-    assert r.status_code in (200,)
+    assert r.status_code == 200
     body = r.get_json()
-    assert body["status"] in ("started", "already_running")
+    assert body["status"] == "started"
 
     # Status should show running
-    time.sleep(0.5)
+    time.sleep(0.3)
     r = client.get("/api/v1/status")
     data = r.get_json()
     assert data["is_running"] is True
@@ -76,6 +76,7 @@ def test_start_stop_lifecycle(client):
 # /api/v1/start — input validation (api-audit API4 whitelist)
 # ---------------------------------------------------------------------------
 def test_start_invalid_mode_rejected(client):
+    client.post("/api/v1/stop")
     r = client.post("/api/v1/start", json={"mode": "evil_mode; rm -rf /"})
     assert r.status_code == 400
     assert "error" in r.get_json()
