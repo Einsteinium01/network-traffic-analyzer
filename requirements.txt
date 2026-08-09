@@ -18,6 +18,7 @@ xgboost==2.1.1              # Compared against Random Forest in Phase 2
 pandas==2.2.2               # Loads and cleans the CICIDS2017 CSV files
 numpy==1.26.4               # Numerical arrays underneath pandas / scikit-learn
 joblib==1.4.2               # Serialises the trained model to models/model.pkl
+pyarrow>=16.0.0             # Parquet I/O for the cleaned dataset cache
 
 # --- Plots for the offline training report ---------------------------------
 matplotlib==3.9.2           # Confusion matrix / feature importance images

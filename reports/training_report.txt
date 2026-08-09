@@ -1,0 +1,32 @@
+=================================================================
+Intelligent Network Traffic Analyzer – Training Report
+=================================================================
+Model          : Random Forest
+Dataset        : CICIDS2017 (binary: BENIGN vs ATTACK)
+Features used  : 70
+Hyperparameters:
+  n_estimators : 100
+  max_features : sqrt
+  max_samples  : 0.5
+  class_weight : balanced
+  test_size    : 0.2
+
+Evaluation Metrics (Test Set)
+----------------------------------------
+  Accuracy  : 0.9990  (99.90%)
+  Precision : 0.9966
+  Recall    : 0.9972
+  F1 Score  : 0.9969
+
+Confusion Matrix (rows=True, cols=Predicted)
+----------------------------------------
+  [[TN  FP]     [418724, 288]
+   [FN  TP]]    [239, 84909]
+
+Saved Artefacts
+----------------------------------------
+  models/model.pkl
+  models/feature_columns.pkl
+  reports/confusion_matrix.png
+  reports/feature_importance.png
+=================================================================

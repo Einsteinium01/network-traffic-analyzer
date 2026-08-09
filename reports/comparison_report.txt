@@ -1,0 +1,21 @@
+====================================================================
+  Network Traffic Analyzer – Model Comparison Report
+====================================================================
+  Dataset        : CICIDS2017 (binary: BENIGN vs ATTACK)
+  Train/Test     : 80% / 20%  (stratified, seed=42)
+  Training rows  : ~2,016,638  |  Test rows: ~504,160
+====================================================================
+
+Model                      Accuracy  Precision   Recall       F1   Time(s)
+--------------------------------------------------------------------
+Random Forest (CPU)          0.9990     0.9966   0.9972   0.9969     155.9
+XGBoost (GPU)                0.9991     0.9947   0.9999   0.9973      22.6
+Decision Tree (CPU)          0.9990     0.9947   0.9991   0.9969     296.9
+--------------------------------------------------------------------
+
+  >> WINNER: XGBoost (GPU)  (F1 = 0.9973)
+  >> Saved as models/model.pkl
+
+Confusion Matrices saved to reports/
+Bar chart saved to reports/comparison_bar_chart.png
+====================================================================
