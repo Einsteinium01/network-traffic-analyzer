@@ -57,6 +57,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.detection_engine import DetectionEngine
+from packet_capture.utils import get_available_interfaces
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -107,17 +108,17 @@ def create_app() -> Flask:
     app.config["SECRET_KEY"] = "nta-dev-secret-not-for-production"
     app.config["JSON_SORT_KEYS"] = False
 
-    # --- CORS (api-audit API8) -------------------------------------------
+    # --- CORS (development & local testing) -------------------------------
     CORS(
         app,
-        resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
+        resources={r"/api/*": {"origins": "*"}},
         supports_credentials=False,
     )
 
     # --- SocketIO -----------------------------------------------------------
     socketio = SocketIO(
         app,
-        cors_allowed_origins=ALLOWED_ORIGINS,
+        cors_allowed_origins="*",
         async_mode="threading",
         logger=False,
         engineio_logger=False,
@@ -126,18 +127,43 @@ def create_app() -> Flask:
     # --- DetectionEngine ----------------------------------------------------
     engine = DetectionEngine()
 
-    # Register listener: broadcast every processed packet over WebSocket
+    _last_packet_emit = 0.0
+
+    # Register listener: broadcast sampled packets and all threat alerts
     def _broadcast_packet(result: Dict[str, Any]) -> None:
-        """Push packet/alert events to all connected Socket.IO clients."""
+        """Push packet/alert events to all connected Socket.IO clients without flooding."""
+        nonlocal _last_packet_emit
         if socketio and not app.config.get("TESTING"):
             try:
-                socketio.emit("packet", result)
+                now = time.time()
+                # Security alerts are ALWAYS broadcasted immediately
                 if result.get("is_attack"):
                     socketio.emit("alert", result)
+
+                # Packet stream is throttled to max ~10 pkts/s (every 100ms) to prevent UI/Socket queue lag
+                if now - _last_packet_emit >= 0.10:
+                    socketio.emit("packet", result)
+                    _last_packet_emit = now
             except Exception as err:
                 log.debug("SocketIO emit exception: %s", err)
 
     engine.register_alert_listener(_broadcast_packet)
+
+    # Background thread: broadcast live stats to all clients every 500ms for instant UI updates
+    def _stats_broadcast_worker():
+        import threading
+        while True:
+            try:
+                time.sleep(0.5)
+                if socketio and engine:
+                    stats = engine.get_live_stats()
+                    socketio.emit("status", stats)
+            except Exception as e:
+                log.debug("Stats broadcast worker error: %s", e)
+
+    import threading
+    stats_thread = threading.Thread(target=_stats_broadcast_worker, daemon=True, name="StatsBroadcastThread")
+    stats_thread.start()
 
     # --- Security headers on every response (api-audit API8) ---------------
     @app.after_request
@@ -162,6 +188,16 @@ def create_app() -> Flask:
             "docs": "/api/v1",
         })
 
+    # ── GET /api/v1/interfaces ─────────────────────────────────────────────
+    @app.get("/api/v1/interfaces")
+    def get_interfaces() -> Response:
+        """Return a list of available network interfaces."""
+        ifaces = get_available_interfaces()
+        return jsonify({
+            "count": len(ifaces),
+            "interfaces": ifaces,
+        }), 200
+
     # ── POST /api/v1/start ─────────────────────────────────────────────────
     @app.post("/api/v1/start")
     def start_monitoring() -> Response:
@@ -169,26 +205,41 @@ def create_app() -> Flask:
         Start real-time packet capture and ML-based intrusion detection.
 
         JSON body (optional):
-          { "mode": "simulation" | "auto" | "scapy" | "raw_socket" }
+          { "mode": "LIVE" | "SIMULATION", "interface": "Wi-Fi" }
         """
         body = request.get_json(silent=True) or {}
-        mode = str(body.get("mode", "auto"))
+        raw_mode = str(body.get("mode", "LIVE")).strip().upper()
+        interface = body.get("interface")
+        if isinstance(interface, str):
+            interface = interface.strip()
 
-        # api-audit API4: whitelist accepted values, never trust raw user input
-        allowed_modes = {"auto", "simulation", "scapy", "raw_socket"}
-        if mode not in allowed_modes:
-            return jsonify({"error": f"Invalid mode '{mode}'. Choose from: {sorted(allowed_modes)}"}), 400
+        allowed_modes = {"LIVE", "SIMULATION", "AUTO", "SCAPY", "RAW_SOCKET"}
+        if raw_mode not in allowed_modes:
+            return jsonify({"error": f"Invalid mode '{raw_mode}'. Choose from: {sorted(allowed_modes)}"}), 400
 
         if engine.is_running():
-            return jsonify({"status": "already_running", "message": "Engine is already running."}), 200
+            return jsonify({
+                "status": "already_running",
+                "message": "Engine is already running.",
+                "capture_mode": engine.sniffer.active_mode if engine.sniffer else "UNKNOWN",
+                "interface": engine.sniffer.interface if engine.sniffer else "Auto",
+            }), 200
 
         try:
-            engine.start(mode=mode)
-            log.info("DetectionEngine started via REST (mode=%s).", mode)
-            return jsonify({"status": "started", "mode": engine.sniffer.active_mode}), 200
+            engine.start(mode=raw_mode, interface=interface)
+            log.info("DetectionEngine started via REST (mode=%s, interface=%s).", raw_mode, interface)
+            stats = engine.get_live_stats()
+            return jsonify({
+                "status": "started",
+                "capture_mode": stats["capture_mode"],
+                "interface": stats["interface"],
+            }), 200
         except Exception as exc:
             log.error("Failed to start engine: %s", exc)
-            return jsonify({"error": "Failed to start monitoring engine."}), 500
+            return jsonify({
+                "error": str(exc),
+                "message": f"Failed to start {raw_mode} packet capture on interface '{interface or 'Auto'}'.",
+            }), 400
 
     # ── POST /api/v1/stop ──────────────────────────────────────────────────
     @app.post("/api/v1/stop")
@@ -209,21 +260,26 @@ def create_app() -> Flask:
     def live_status() -> Response:
         """
         Return live traffic statistics and threat level.
-
-        api-audit API3: returns a curated DTO, not the full engine state.
         """
         stats = engine.get_live_stats()
         return jsonify({
             "is_running": stats["is_running"],
-            "mode": stats["mode"],
+            "capture_mode": stats["capture_mode"],
+            "interface": stats["interface"],
+            "error_message": stats.get("error_message"),
             "threat_level": stats["threat_level"],
             "total_packets": stats["total_packets"],
+            "total_bytes": stats["total_bytes"],
             "normal_packets": stats["normal_packets"],
             "attack_packets": stats["attack_packets"],
             "normal_pct": stats["normal_pct"],
             "attack_pct": stats["attack_pct"],
             "packets_per_second": stats["packets_per_second"],
             "bytes_per_second": stats["bytes_per_second"],
+            "active_flows": stats.get("active_flows", 0),
+            "tcp_count": stats.get("tcp_count", 0),
+            "udp_count": stats.get("udp_count", 0),
+            "icmp_count": stats.get("icmp_count", 0),
             "duration_seconds": stats["duration_seconds"],
         }), 200
 

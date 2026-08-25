@@ -349,7 +349,7 @@ Use Flask-SocketIO for real-time updates.
 
 # Phase 7 – Frontend
 
-Create a professional dashboard.
+Create a professional dashboard use @DESIGN.md file in the directory for the design of the frontend.
 
 Sections
 

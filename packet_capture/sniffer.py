@@ -26,12 +26,18 @@ FILE: packet_capture/sniffer.py
 import sys
 import time
 import socket
+import struct
 import random
 import logging
 import threading
+import ctypes
+from ctypes import (
+    Structure, POINTER, c_char_p, c_void_p, c_int, c_uint, c_ubyte,
+    byref, create_string_buffer, string_at
+)
 from queue import Queue, Empty
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
 
 from packet_capture.utils import (
     parse_ip_header,
@@ -44,34 +50,76 @@ from packet_capture.utils import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Npcap C-Types Structures & Helper
+# ---------------------------------------------------------------------------
+class _pcap_if(Structure):
+    pass
+
+_pcap_if._fields_ = [
+    ('next', POINTER(_pcap_if)),
+    ('name', c_char_p),
+    ('description', c_char_p),
+    ('addresses', c_void_p),
+    ('flags', c_uint)
+]
+
+
+def _load_wpcap_dll():
+    """Load wpcap.dll from System32 or PATH."""
+    paths = ['wpcap.dll', r'C:\Windows\System32\Npcap\wpcap.dll', r'C:\Windows\System32\wpcap.dll']
+    for p in paths:
+        try:
+            dll = ctypes.cdll.LoadLibrary(p)
+            dll.pcap_lib_version.restype = c_char_p
+            dll.pcap_findalldevs.argtypes = [POINTER(POINTER(_pcap_if)), c_char_p]
+            dll.pcap_findalldevs.restype = c_int
+            dll.pcap_freealldevs.argtypes = [POINTER(_pcap_if)]
+            dll.pcap_freealldevs.restype = None
+            dll.pcap_open_live.argtypes = [c_char_p, c_int, c_int, c_int, c_char_p]
+            dll.pcap_open_live.restype = c_void_p
+            dll.pcap_close.argtypes = [c_void_p]
+            dll.pcap_close.restype = None
+            dll.pcap_next_ex.argtypes = [c_void_p, POINTER(c_void_p), POINTER(POINTER(c_ubyte))]
+            dll.pcap_next_ex.restype = c_int
+            dll.pcap_setbuff.argtypes = [c_void_p, c_int]
+            dll.pcap_setbuff.restype = c_int
+            return dll
+        except Exception:
+            continue
+    return None
+
+
 class PacketSniffer:
     """
-    Thread-safe packet sniffer supporting Scapy, Raw Socket, and Simulation modes.
+    Thread-safe packet sniffer supporting Npcap ctypes (High-Speed LIVE),
+    Scapy (Legacy LIVE), Raw Socket, and SIMULATION modes.
     """
 
     def __init__(
         self,
         interface: Optional[str] = None,
         filter_proto: Optional[str] = None,
-        mode: str = "auto",
+        mode: str = "LIVE",
         callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         max_queue_size: int = 1000,
     ):
         """
         Initialize PacketSniffer.
 
-        :param interface: Network interface name or IP to capture on (None = auto)
-        :param filter_proto: Protocol filter ('TCP', 'UDP', 'ICMP', or None for all)
-        :param mode: Capture mode ('auto', 'scapy', 'raw_socket', 'simulation')
-        :param callback: Optional function invoked on every captured packet dict
-        :param max_queue_size: Max buffer capacity for internal packet queue
+        :param interface: Network interface name (e.g. 'Wi-Fi') or None/auto
+        :param filter_proto: Protocol filter ('TCP', 'UDP', 'ICMP', or None)
+        :param mode: 'LIVE', 'SIMULATION', 'NPCAP', 'SCAPY', 'RAW_SOCKET', 'AUTO'
+        :param callback: Callback function invoked on every captured packet dict
+        :param max_queue_size: Max buffer capacity for packet queue
         """
-        self.interface = interface
+        self.requested_mode = mode.upper() if mode else "LIVE"
+        self.interface = self._resolve_interface(interface)
         self.filter_proto = filter_proto.upper() if filter_proto else None
-        self.requested_mode = mode.lower()
-        self.active_mode = "simulation"
+        self.active_mode = "LIVE" if self.requested_mode in ("LIVE", "AUTO", "NPCAP", "SCAPY", "RAW_SOCKET") else "SIMULATION"
         self.callback = callback
         self.max_queue_size = max_queue_size
+        self.error_message: Optional[str] = None
 
         self.packet_queue: Queue = Queue(maxsize=max_queue_size)
         self._running = False
@@ -91,29 +139,66 @@ class PacketSniffer:
             "stop_time": None,
         }
 
-    def _determine_mode(self) -> str:
-        """Test and select the best available capture mode."""
-        if self.requested_mode != "auto":
-            return self.requested_mode
+    def _resolve_interface(self, iface_input: Optional[str]) -> Optional[str]:
+        """Resolve requested interface name or pick best active interface if auto/None."""
+        if iface_input and iface_input.strip().lower() not in ("auto", "none", ""):
+            return iface_input.strip()
 
-        # Test Scapy mode (check if pcap is present)
+        # Find best active UP IPv4 interface
         try:
-            import scapy.all as scapy
-            if hasattr(scapy, "get_working_ifaces") and scapy.get_working_ifaces():
+            import psutil
+            net_addrs = psutil.net_if_addrs()
+            net_stats = psutil.net_if_stats()
+
+            for name, addrs in net_addrs.items():
+                stat = net_stats.get(name)
+                if stat and stat.isup and not ("loopback" in name.lower()):
+                    for addr in addrs:
+                        if getattr(addr.family, "name", str(addr.family)) == "AF_INET" and addr.address != "127.0.0.1":
+                            return name
+        except Exception:
+            pass
+
+        return None
+
+    def _determine_engine(self) -> str:
+        """Determine engine for capture. Returns 'npcap', 'scapy', 'raw_socket', or 'simulation'."""
+        if self.requested_mode == "SIMULATION":
+            return "simulation"
+
+        # 1. Primary High-Throughput Engine: Npcap via Ctypes
+        if self.requested_mode in ("LIVE", "AUTO", "NPCAP"):
+            dll = _load_wpcap_dll()
+            if dll:
+                return "npcap"
+            elif self.requested_mode == "NPCAP":
+                raise RuntimeError("Npcap is not installed or wpcap.dll could not be loaded.")
+
+        # 2. Fallback Engine: Scapy
+        if self.requested_mode in ("LIVE", "SCAPY"):
+            try:
+                import scapy.all as scapy
                 return "scapy"
-        except Exception:
-            pass
+            except ImportError:
+                if self.requested_mode == "SCAPY":
+                    raise RuntimeError("Scapy is not installed. Please run: pip install scapy")
 
-        # Test Raw Socket mode
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
-            s.close()
-            return "raw_socket"
-        except Exception:
-            pass
+        # 3. Fallback Engine: Raw Socket
+        if self.requested_mode in ("LIVE", "RAW_SOCKET"):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+                s.close()
+                return "raw_socket"
+            except Exception as e:
+                if self.requested_mode == "RAW_SOCKET":
+                    raise RuntimeError(f"Raw socket permission denied: {e}")
 
-        # Default to Simulation mode if hardware capture is restricted
+        # If LIVE mode was explicitly requested but no backend works, throw explicit error
+        if self.requested_mode in ("LIVE", "NPCAP", "SCAPY", "RAW_SOCKET"):
+            raise RuntimeError("LIVE capture failed: Npcap/Scapy hardware backend unavailable.")
+
         return "simulation"
+
 
     def start(self) -> None:
         """Start packet capture in a background thread."""
@@ -121,7 +206,10 @@ class PacketSniffer:
             logger.warning("PacketSniffer is already running.")
             return
 
-        self.active_mode = self._determine_mode()
+        self.error_message = None
+        engine_type = self._determine_engine()
+        self.active_mode = "SIMULATION" if engine_type == "simulation" else "LIVE"
+
         self._running = True
         self._stop_event.clear()
 
@@ -138,11 +226,12 @@ class PacketSniffer:
             }
 
         target_map = {
+            "npcap": self._npcap_capture_loop,
             "scapy": self._scapy_capture_loop,
             "raw_socket": self._raw_socket_capture_loop,
             "simulation": self._simulation_capture_loop,
         }
-        target_fn = target_map.get(self.active_mode, self._simulation_capture_loop)
+        target_fn = target_map.get(engine_type, self._simulation_capture_loop)
 
         self._thread = threading.Thread(
             target=target_fn,
@@ -150,9 +239,9 @@ class PacketSniffer:
             daemon=True,
         )
         self._thread.start()
-        logger.info(f"PacketSniffer started in [{self.active_mode.upper()}] mode.")
+        logger.info(f"PacketSniffer started in [{self.active_mode}] mode (Interface: {self.interface or 'default'}).")
 
-    def stop(self, timeout: float = 0.2) -> None:
+    def stop(self, timeout: float = 0.5) -> None:
         """Stop packet capture thread."""
         if not self._running:
             return
@@ -201,8 +290,10 @@ class PacketSniffer:
             total_bytes = self.stats["total_bytes"]
 
             return {
-                "active_mode": self.active_mode,
+                "capture_mode": self.active_mode,
+                "interface": self.interface or "Auto/Default",
                 "is_running": self.is_running(),
+                "error_message": self.error_message,
                 "total_packets": total_pkts,
                 "tcp_count": self.stats["tcp_count"],
                 "udp_count": self.stats["udp_count"],
@@ -252,7 +343,218 @@ class PacketSniffer:
                 logger.error(f"Error in packet callback: {e}")
 
     # -------------------------------------------------------------------------
-    # Engine 1: Scapy Capture Loop
+    # Engine 1: Direct Npcap C-Types Capture Loop (High-Speed LIVE Mode)
+    # -------------------------------------------------------------------------
+    def _npcap_capture_loop(self) -> None:
+        """
+        High-throughput LIVE packet capture via Npcap wpcap.dll.
+        Uses 32 MB kernel driver ring buffer and ~1.2µs fast struct header parsing.
+        """
+        handle = None
+        dll = None
+        try:
+            dll = _load_wpcap_dll()
+            if not dll:
+                raise RuntimeError("Npcap wpcap.dll could not be loaded.")
+
+            errbuf = create_string_buffer(256)
+            devs = POINTER(_pcap_if)()
+
+            if dll.pcap_findalldevs(byref(devs), errbuf) != 0:
+                raise RuntimeError(f"Failed to enumerate Npcap devices: {errbuf.value.decode('utf-8')}")
+
+            target_dev = None
+            target_desc = ""
+            curr = devs
+
+            # Match requested interface
+            req_iface = (self.interface or "").lower().strip()
+            while curr:
+                dev = curr.contents
+                desc = dev.description.decode('utf-8', errors='ignore') if dev.description else ''
+                name = dev.name.decode('utf-8', errors='ignore') if dev.name else ''
+
+                if req_iface and req_iface not in ("auto", "none", "default"):
+                    if req_iface in name.lower() or req_iface in desc.lower():
+                        target_dev = dev.name
+                        target_desc = desc
+                        break
+                else:
+                    # Auto: pick active Wi-Fi or Ethernet
+                    if any(k in desc.lower() for k in ['wi-fi', 'wireless', 'wlan', 'ethernet']) and 'virtual' not in desc.lower():
+                        target_dev = dev.name
+                        target_desc = desc
+                        break
+
+                curr = dev.next
+
+            # Fallback to first non-loopback device if no match
+            if not target_dev:
+                curr = devs
+                while curr:
+                    if b'Loopback' not in curr.contents.name:
+                        target_dev = curr.contents.name
+                        target_desc = curr.contents.description.decode('utf-8', errors='ignore') if curr.contents.description else ''
+                        break
+                    curr = curr.contents.next
+
+            dev_bytes = target_dev
+            dll.pcap_freealldevs(devs)
+
+            if not dev_bytes:
+                raise RuntimeError("No suitable Npcap network interface found.")
+
+            # Open live device (snaplen = 65535, promisc = 1, timeout = 50ms)
+            handle = dll.pcap_open_live(dev_bytes, 65535, 1, 50, errbuf)
+            if not handle:
+                raise RuntimeError(f"Failed to open Npcap device ({target_desc}): {errbuf.value.decode('utf-8')}")
+
+            # Configure 32 MB kernel ring buffer
+            dll.pcap_setbuff(handle, 32 * 1024 * 1024)
+            logger.info(f"Npcap capture active on [{target_desc}] with 32MB kernel buffer.")
+
+            hdr_ptr = c_void_p()
+            data_ptr = POINTER(c_ubyte)()
+
+            while not self._stop_event.is_set():
+                res = dll.pcap_next_ex(handle, byref(hdr_ptr), byref(data_ptr))
+                if res != 1:
+                    continue  # Timeout or empty
+
+                raw_hdr = string_at(hdr_ptr, 16)
+                t_sec, t_usec, caplen, orig_len = struct.unpack('<iiII', raw_hdr)
+                ts = t_sec + (t_usec / 1e6)
+                raw_data = string_at(data_ptr, caplen)
+
+                if len(raw_data) < 14:
+                    continue
+
+                # 1. Ethernet Header (14 bytes)
+                eth_type = struct.unpack_from('>H', raw_data, 12)[0]
+                offset = 14
+                if eth_type == 0x8100:  # 802.1Q VLAN Tag
+                    if len(raw_data) < 18:
+                        continue
+                    eth_type = struct.unpack_from('>H', raw_data, 16)[0]
+                    offset = 18
+
+                src_ip = None
+                dst_ip = None
+                proto_str = "OTHER"
+                proto_num = 0
+                src_port = 0
+                dst_port = 0
+                hdr_len = 0
+                ttl = 64
+                flags_dict = None
+                window_size = 0
+
+                if eth_type == 0x0800:  # IPv4
+                    if len(raw_data) < offset + 20:
+                        continue
+                    v_ihl, tos, total_len, _, _, ttl, proto_num = struct.unpack_from('>BBHHHBB', raw_data, offset)
+                    ihl = (v_ihl & 0x0F) * 4
+                    if ihl < 20 or len(raw_data) < offset + ihl:
+                        continue
+
+                    src_ip = socket.inet_ntoa(raw_data[offset + 12 : offset + 16])
+                    dst_ip = socket.inet_ntoa(raw_data[offset + 16 : offset + 20])
+                    l4_offset = offset + ihl
+
+                    if proto_num == 6:  # TCP
+                        proto_str = "TCP"
+                        if len(raw_data) >= l4_offset + 20:
+                            sp, dp, seq, ack_seq, off_res, flg, win = struct.unpack_from('>HHIIBBH', raw_data, l4_offset)
+                            src_port, dst_port = sp, dp
+                            hdr_len = ((off_res >> 4) & 0x0F) * 4
+                            window_size = win
+                            flags_dict = {
+                                "FIN": bool(flg & 0x01),
+                                "SYN": bool(flg & 0x02),
+                                "RST": bool(flg & 0x04),
+                                "PSH": bool(flg & 0x08),
+                                "ACK": bool(flg & 0x10),
+                                "URG": bool(flg & 0x20),
+                                "ECE": bool(flg & 0x40),
+                                "CWE": bool(flg & 0x80),
+                            }
+                    elif proto_num == 17:  # UDP
+                        proto_str = "UDP"
+                        if len(raw_data) >= l4_offset + 8:
+                            src_port, dst_port, _ = struct.unpack_from('>HHH', raw_data, l4_offset)
+                            hdr_len = 8
+                    elif proto_num == 1:  # ICMP
+                        proto_str = "ICMP"
+                        hdr_len = 8
+
+                elif eth_type == 0x86DD:  # IPv6
+                    if len(raw_data) < offset + 40:
+                        continue
+                    next_hdr = struct.unpack_from('>B', raw_data, offset + 6)[0]
+                    proto_num = next_hdr
+                    src_ip = socket.inet_ntop(socket.AF_INET6, raw_data[offset + 8 : offset + 24])
+                    dst_ip = socket.inet_ntop(socket.AF_INET6, raw_data[offset + 24 : offset + 40])
+                    l4_offset = offset + 40
+
+                    if next_hdr == 6:  # TCP
+                        proto_str = "TCP"
+                        if len(raw_data) >= l4_offset + 20:
+                            sp, dp, seq, ack_seq, off_res, flg, win = struct.unpack_from('>HHIIBBH', raw_data, l4_offset)
+                            src_port, dst_port = sp, dp
+                            hdr_len = ((off_res >> 4) & 0x0F) * 4
+                            window_size = win
+                            flags_dict = {
+                                "FIN": bool(flg & 0x01),
+                                "SYN": bool(flg & 0x02),
+                                "RST": bool(flg & 0x04),
+                                "PSH": bool(flg & 0x08),
+                                "ACK": bool(flg & 0x10),
+                                "URG": bool(flg & 0x20),
+                                "ECE": bool(flg & 0x40),
+                                "CWE": bool(flg & 0x80),
+                            }
+                    elif next_hdr == 17:  # UDP
+                        proto_str = "UDP"
+                        if len(raw_data) >= l4_offset + 8:
+                            src_port, dst_port = struct.unpack_from('>HH', raw_data, l4_offset)
+                            hdr_len = 8
+
+                if not src_ip or not dst_ip:
+                    continue
+
+                pkt_dict = {
+                    "timestamp": ts,
+                    "timestamp_str": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "protocol": proto_str,
+                    "protocol_num": proto_num,
+                    "length": orig_len,
+                    "header_len": hdr_len,
+                    "ttl": ttl,
+                    "tcp_flags": flags_dict,
+                    "init_win": window_size,
+                    "simulated": False,
+                }
+
+                self._process_packet_dict(pkt_dict)
+
+        except Exception as e:
+            err_msg = f"LIVE Npcap ctypes capture error on interface '{self.interface or 'default'}': {e}"
+            logger.error(err_msg)
+            self.error_message = err_msg
+            self._running = False
+        finally:
+            if handle and dll:
+                try:
+                    dll.pcap_close(handle)
+                except Exception:
+                    pass
+
+    # -------------------------------------------------------------------------
+    # Engine 2: Scapy Capture Loop (Legacy LIVE Mode)
     # -------------------------------------------------------------------------
     def _scapy_capture_loop(self) -> None:
         try:
@@ -262,11 +564,25 @@ class PacketSniffer:
                 if not self._running:
                     return
 
-                if not scapy_pkt.haslayer(scapy.IP):
-                    return
+                # Accept both IPv4 and IPv6 packets
+                if scapy_pkt.haslayer(scapy.IP):
+                    ip_layer = scapy_pkt[scapy.IP]
+                    src_ip = ip_layer.src
+                    dst_ip = ip_layer.dst
+                    proto_num = ip_layer.proto
+                    ttl = getattr(ip_layer, "ttl", 64)
+                    header_len = ip_layer.ihl * 4 if hasattr(ip_layer, "ihl") else 20
+                elif scapy_pkt.haslayer(scapy.IPv6):
+                    ip6_layer = scapy_pkt[scapy.IPv6]
+                    src_ip = ip6_layer.src
+                    dst_ip = ip6_layer.dst
+                    proto_num = ip6_layer.nh  # Next Header field
+                    ttl = getattr(ip6_layer, "hlim", 64)  # Hop Limit
+                    header_len = 40  # Fixed IPv6 header size
+                else:
+                    return  # Not IP or IPv6 — skip
 
-                ip_layer = scapy_pkt[scapy.IP]
-                proto_name = get_protocol_name(ip_layer.proto)
+                proto_name = get_protocol_name(proto_num)
 
                 src_port = 0
                 dst_port = 0
@@ -293,32 +609,38 @@ class PacketSniffer:
                 pkt_dict = {
                     "timestamp": now,
                     "timestamp_str": datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                    "src_ip": ip_layer.src,
-                    "dst_ip": ip_layer.dst,
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
                     "src_port": src_port,
                     "dst_port": dst_port,
                     "protocol": proto_name,
-                    "protocol_num": ip_layer.proto,
+                    "protocol_num": proto_num,
                     "length": len(scapy_pkt),
-                    "header_len": ip_layer.ihl * 4 if hasattr(ip_layer, 'ihl') else 20,
-                    "ttl": getattr(ip_layer, "ttl", 64),
+                    "header_len": header_len,
+                    "ttl": ttl,
                     "tcp_flags": tcp_flags,
                     "raw_bytes": bytes(scapy_pkt),
+                    "simulated": False,
                 }
 
                 self._process_packet_dict(pkt_dict)
 
             # Start sniffing loop
-            scapy.sniff(
-                iface=self.interface,
-                prn=scapy_callback,
-                stop_filter=lambda p: self._stop_event.is_set(),
-                store=0,
-            )
+            sniff_kwargs = {
+                "prn": scapy_callback,
+                "stop_filter": lambda p: self._stop_event.is_set(),
+                "store": 0,
+            }
+            if self.interface:
+                sniff_kwargs["iface"] = self.interface
+
+            scapy.sniff(**sniff_kwargs)
         except Exception as e:
-            logger.error(f"Scapy capture error ({e}). Falling back to simulation.")
-            self.active_mode = "simulation"
-            self._simulation_capture_loop()
+            err_msg = f"LIVE Scapy capture error on interface '{self.interface or 'default'}': {e}"
+            logger.error(err_msg)
+            self.error_message = err_msg
+            self._running = False
+            # DO NOT fall back silently to simulation mode! Raise error / stop.
 
     # -------------------------------------------------------------------------
     # Engine 2: Raw Socket Capture Loop
@@ -330,7 +652,6 @@ class PacketSniffer:
             s.bind((host_ip, 0))
             s.settimeout(0.5)
 
-            # Enable promiscuous mode on Windows
             if sys.platform == "win32":
                 s.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
 
@@ -361,6 +682,7 @@ class PacketSniffer:
                     "ttl": ip_info["ttl"],
                     "tcp_flags": transport_info["tcp_flags"],
                     "raw_bytes": raw_data,
+                    "simulated": False,
                 }
                 self._process_packet_dict(pkt_dict)
 
@@ -368,47 +690,57 @@ class PacketSniffer:
                 s.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
             s.close()
         except Exception as e:
-            logger.error(f"Raw socket error ({e}). Falling back to simulation.")
-            self.active_mode = "simulation"
-            self._simulation_capture_loop()
+            err_msg = f"LIVE Raw socket capture error: {e}"
+            logger.error(err_msg)
+            self.error_message = err_msg
+            self._running = False
+            # DO NOT fall back silently to simulation mode!
 
     # -------------------------------------------------------------------------
-    # Engine 3: Simulation Capture Loop (For offline testing / restricted environments)
+    # Engine 3: Simulation Capture Loop (Explicit SIMULATION Mode)
     # -------------------------------------------------------------------------
     def _simulation_capture_loop(self) -> None:
-        """Generates realistic live traffic streams (Normal & Attack scenarios)."""
-        normal_src_ips = ["192.168.1.45", "192.168.1.102", "10.0.0.15", "172.16.0.8"]
-        external_dst_ips = ["8.8.8.8", "1.1.1.1", "142.250.190.46", "104.16.249.249"]
-        attacker_ips = ["185.220.101.5", "45.154.255.12", "192.168.1.250"]
+        """Generates synthetic traffic streams with multi-packet flow sessions."""
+        normal_sessions = [
+            ("192.168.1.45", 54320, "142.250.190.46", 443, "TCP"),
+            ("192.168.1.45", 54322, "8.8.8.8", 53, "UDP"),
+            ("192.168.1.102", 49152, "104.16.249.249", 80, "TCP"),
+            ("10.0.0.15", 58900, "1.1.1.1", 443, "TCP"),
+        ]
 
-        common_ports = [80, 443, 53, 22, 8080, 21, 3389, 445]
+        active_sim_sessions = list(normal_sessions)
 
         while not self._stop_event.is_set():
-            # 85% normal traffic, 15% simulated attack pattern (DoSS, PortScan, etc.)
-            is_attack = random.random() < 0.15
+            # Pick a sustained session or create a new one
+            if random.random() < 0.20 or not active_sim_sessions:
+                src_ip = random.choice(["192.168.1.45", "192.168.1.102", "10.0.0.15"])
+                dst_ip = random.choice(["8.8.8.8", "1.1.1.1", "142.250.190.46", "104.16.249.249"])
+                proto = random.choice(["TCP", "TCP", "UDP", "ICMP"])
+                src_port = random.randint(1024, 65535) if proto != "ICMP" else 0
+                dst_port = random.choice([80, 443, 53, 8080]) if proto != "ICMP" else 0
+                session = (src_ip, src_port, dst_ip, dst_port, proto)
+                active_sim_sessions.append(session)
+                if len(active_sim_sessions) > 10:
+                    active_sim_sessions.pop(0)
 
-            if not is_attack:
-                proto = random.choice(["TCP", "TCP", "TCP", "UDP", "ICMP"])
-                src_ip = random.choice(normal_src_ips)
-                dst_ip = random.choice(external_dst_ips)
-            else:
-                proto = random.choice(["TCP", "UDP", "TCP"])
-                src_ip = random.choice(attacker_ips)
-                dst_ip = "192.168.1.100"  # Target server
+            session = random.choice(active_sim_sessions)
+            src_ip, src_port, dst_ip, dst_port, proto = session
 
-            src_port = random.randint(1024, 65535) if proto != "ICMP" else 0
-            dst_port = random.choice(common_ports) if proto != "ICMP" else 0
+            length = random.randint(128, 1460) if proto != "ICMP" else 64
 
-            length = random.randint(64, 1514) if proto != "ICMP" else random.randint(64, 128)
+            # Bi-directional packet simulation
+            if random.random() < 0.4:
+                src_ip, dst_ip = dst_ip, src_ip
+                src_port, dst_port = dst_port, src_port
 
             tcp_flags = None
             if proto == "TCP":
                 tcp_flags = {
-                    "FIN": random.random() < 0.1,
-                    "SYN": is_attack or random.random() < 0.3,
-                    "RST": random.random() < 0.05,
-                    "PSH": random.random() < 0.4,
-                    "ACK": random.random() < 0.8,
+                    "FIN": False,
+                    "SYN": False,
+                    "RST": False,
+                    "PSH": random.random() < 0.3,
+                    "ACK": True,
                     "URG": False,
                 }
 
@@ -424,11 +756,12 @@ class PacketSniffer:
                 "protocol_num": 6 if proto == "TCP" else (17 if proto == "UDP" else 1),
                 "length": length,
                 "header_len": 20,
-                "ttl": random.choice([64, 128, 255]),
+                "ttl": 64,
                 "tcp_flags": tcp_flags,
                 "simulated": True,
             }
 
             self._process_packet_dict(pkt_dict)
-            if self._stop_event.wait(timeout=random.uniform(0.05, 0.15)):
+            if self._stop_event.wait(timeout=random.uniform(0.01, 0.05)):
                 break
+

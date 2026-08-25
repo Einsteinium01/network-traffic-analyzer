@@ -16,12 +16,71 @@ HOW IT WORKS
 4. `to_feature_dict()` computes statistical metrics (mean, std, rates, idle/active times)
    and outputs a dictionary with exact column keys matching CICIDS2017 training features.
 
+PERFORMANCE
+-----------
+All per-packet statistics use Welford's online algorithm (O(1) per update, O(1) to
+read statistics). No unbounded lists are stored — memory is constant per flow
+regardless of how many packets it contains.
+
 FILE: feature_extraction/flow.py
 """
 
 import math
 import time
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional
+
+
+class _OnlineStats:
+    """
+    Welford's online algorithm for incremental mean, variance, min, max, sum.
+
+    Produces sample variance (N-1 denominator), matching the original
+    Flow._stats() implementation exactly.
+    """
+    __slots__ = ('n', '_mean', '_M2', 'min_val', 'max_val', 'sum_val')
+
+    def __init__(self):
+        self.n: int = 0
+        self._mean: float = 0.0
+        self._M2: float = 0.0          # sum of squared deviations from running mean
+        self.min_val: float = float('inf')
+        self.max_val: float = float('-inf')
+        self.sum_val: float = 0.0
+
+    def add(self, x: float) -> None:
+        """Ingest one observation — O(1)."""
+        self.n += 1
+        self.sum_val += x
+        delta = x - self._mean
+        self._mean += delta / self.n
+        delta2 = x - self._mean
+        self._M2 += delta * delta2
+        if x < self.min_val:
+            self.min_val = x
+        if x > self.max_val:
+            self.max_val = x
+
+    def get_stats(self) -> Tuple[float, float, float, float, float]:
+        """
+        Return (min, max, mean, std, variance) — O(1).
+
+        Semantics exactly match the original Flow._stats():
+        - empty → (0, 0, 0, 0, 0)
+        - n == 1 → (val, val, val, 0, 0)
+        - n > 1 → sample variance (ddof=1)
+        """
+        if self.n == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        mn = float(self.min_val)
+        mx = float(self.max_val)
+        mean = float(self._mean)
+        if self.n > 1:
+            var = float(self._M2 / (self.n - 1))
+            std = float(math.sqrt(var)) if var > 0 else 0.0
+        else:
+            var = 0.0
+            std = 0.0
+        return mn, mx, mean, std, var
 
 
 class Flow:
@@ -52,15 +111,22 @@ class Flow:
         self.fwd_pkts: int = 0
         self.bwd_pkts: int = 0
 
-        # Packet Lengths
-        self.fwd_pkt_lengths: List[int] = []
-        self.bwd_pkt_lengths: List[int] = []
-        self.all_pkt_lengths: List[int] = []
+        # ── Online statistics (Welford's) ────────────────────────────────────
+        # Replaces unbounded lists with O(1) incremental trackers.
 
-        # Inter-Arrival Times (in microseconds as floats, matching CICIDS2017)
-        self.flow_iats: List[float] = []
-        self.fwd_iats: List[float] = []
-        self.bwd_iats: List[float] = []
+        # Packet Lengths
+        self.fwd_len_stats = _OnlineStats()
+        self.bwd_len_stats = _OnlineStats()
+        self.all_len_stats = _OnlineStats()
+
+        # Inter-Arrival Times (in microseconds, matching CICIDS2017)
+        self.flow_iat_stats = _OnlineStats()
+        self.fwd_iat_stats = _OnlineStats()
+        self.bwd_iat_stats = _OnlineStats()
+
+        # Active & Idle Times (microseconds)
+        self.active_stats = _OnlineStats()
+        self.idle_stats = _OnlineStats()
 
         # Header Lengths
         self.fwd_header_len: int = 0
@@ -73,9 +139,7 @@ class Flow:
             "fwd_psh": 0, "fwd_urg": 0,
         }
 
-        # Active & Idle Times (microseconds)
-        self.active_times: List[float] = []
-        self.idle_times: List[float] = []
+        # Active / Idle gap tracking
         self.current_active_start: float = ts
         self.idle_threshold: float = 1.0  # 1 second threshold for idle gap
 
@@ -107,32 +171,32 @@ class Flow:
         if self.last_seen > 0:
             flow_iat = (ts - self.last_seen) * 1e6
             if flow_iat >= 0:
-                self.flow_iats.append(flow_iat)
+                self.flow_iat_stats.add(flow_iat)
 
                 # Active / Idle tracking
                 gap_sec = ts - self.last_seen
                 if gap_sec > self.idle_threshold:
                     idle_us = gap_sec * 1e6
-                    self.idle_times.append(idle_us)
+                    self.idle_stats.add(idle_us)
                     active_us = (self.last_seen - self.current_active_start) * 1e6
                     if active_us > 0:
-                        self.active_times.append(active_us)
+                        self.active_stats.add(active_us)
                     self.current_active_start = ts
 
         self.last_seen = max(self.last_seen, ts)
-        self.all_pkt_lengths.append(length)
+        self.all_len_stats.add(float(length))
 
         is_fwd = self.is_forward(pkt)
 
         if is_fwd:
             self.fwd_pkts += 1
-            self.fwd_pkt_lengths.append(length)
+            self.fwd_len_stats.add(float(length))
             self.fwd_header_len += hdr_len
 
             if self.fwd_last_seen is not None:
                 fwd_iat = (ts - self.fwd_last_seen) * 1e6
                 if fwd_iat >= 0:
-                    self.fwd_iats.append(fwd_iat)
+                    self.fwd_iat_stats.add(fwd_iat)
             self.fwd_last_seen = ts
 
             # Payload packet counter
@@ -142,13 +206,13 @@ class Flow:
 
         else:  # Backward direction
             self.bwd_pkts += 1
-            self.bwd_pkt_lengths.append(length)
+            self.bwd_len_stats.add(float(length))
             self.bwd_header_len += hdr_len
 
             if self.bwd_last_seen is not None:
                 bwd_iat = (ts - self.bwd_last_seen) * 1e6
                 if bwd_iat >= 0:
-                    self.bwd_iats.append(bwd_iat)
+                    self.bwd_iat_stats.add(bwd_iat)
             self.bwd_last_seen = ts
 
         # Flags
@@ -162,59 +226,49 @@ class Flow:
                     if is_fwd and flag_name == "URG":
                         self.flag_counts["fwd_urg"] += 1
 
-    # -------------------------------------------------------------------------
-    # Helper Statistical Calculations
-    # -------------------------------------------------------------------------
-    @staticmethod
-    def _stats(arr: List[float]) -> Tuple[float, float, float, float, float]:
-        """Return (min, max, mean, std, variance) for a list of numbers."""
-        if not arr:
-            return 0.0, 0.0, 0.0, 0.0, 0.0
-        n = len(arr)
-        mn = float(min(arr))
-        mx = float(max(arr))
-        mean = float(sum(arr) / n)
-        if n > 1:
-            var = float(sum((x - mean) ** 2 for x in arr) / (n - 1))
-            std = float(math.sqrt(var))
-        else:
-            var = 0.0
-            std = 0.0
-        return mn, mx, mean, std, var
-
     def to_feature_dict(self) -> Dict[str, float]:
         """
         Calculates all 70 CICIDS2017 features expected by the trained ML model.
+        All statistical lookups are O(1) via Welford's online stats.
         """
-        duration_us = max(0.0, (self.last_seen - self.start_time) * 1e6)
-        duration_sec = max(duration_us / 1e6, 0.000001)
+        # Duration calculation
+        raw_duration_sec = max(0.0, self.last_seen - self.start_time)
+        duration_us = raw_duration_sec * 1e6
 
-        fwd_len_min, fwd_len_max, fwd_len_mean, fwd_len_std, _ = self._stats(self.fwd_pkt_lengths)
-        bwd_len_min, bwd_len_max, bwd_len_mean, bwd_len_std, _ = self._stats(self.bwd_pkt_lengths)
-        all_len_min, all_len_max, all_len_mean, all_len_std, all_len_var = self._stats(self.all_pkt_lengths)
+        # Length stats — O(1) via _OnlineStats.get_stats()
+        fwd_len_min, fwd_len_max, fwd_len_mean, fwd_len_std, _ = self.fwd_len_stats.get_stats()
+        bwd_len_min, bwd_len_max, bwd_len_mean, bwd_len_std, _ = self.bwd_len_stats.get_stats()
+        all_len_min, all_len_max, all_len_mean, all_len_std, all_len_var = self.all_len_stats.get_stats()
 
-        tot_fwd_bytes = float(sum(self.fwd_pkt_lengths))
-        tot_bwd_bytes = float(sum(self.bwd_pkt_lengths))
+        tot_fwd_bytes = float(self.fwd_len_stats.sum_val)
+        tot_bwd_bytes = float(self.bwd_len_stats.sum_val)
         tot_bytes = tot_fwd_bytes + tot_bwd_bytes
-        tot_pkts = self.fwd_pkts + self.bwd_pkts
+        tot_pkts = float(self.fwd_pkts + self.bwd_pkts)
 
-        # Rates
-        flow_bytes_per_sec = tot_bytes / duration_sec
-        flow_pkts_per_sec = tot_pkts / duration_sec
-        fwd_pkts_per_sec = self.fwd_pkts / duration_sec
-        bwd_pkts_per_sec = self.bwd_pkts / duration_sec
+        # TASK 5: Prevent zero-duration single packet rate explosion (1,000,000 pkts/s)
+        # For a single-packet flow (duration = 0), use a minimum 1.0 second window for rate calculation
+        if tot_pkts <= 1.0 or raw_duration_sec <= 0.0001:
+            rate_duration_sec = max(raw_duration_sec, 1.0)
+        else:
+            rate_duration_sec = raw_duration_sec
 
-        # IATs
-        flow_iat_min, flow_iat_max, flow_iat_mean, flow_iat_std, _ = self._stats(self.flow_iats)
-        fwd_iat_min, fwd_iat_max, fwd_iat_mean, fwd_iat_std, _ = self._stats(self.fwd_iats)
-        bwd_iat_min, bwd_iat_max, bwd_iat_mean, bwd_iat_std, _ = self._stats(self.bwd_iats)
+        # Rates (bounded and physically realistic)
+        flow_bytes_per_sec = min(tot_bytes / rate_duration_sec, 1e8)
+        flow_pkts_per_sec = min(tot_pkts / rate_duration_sec, 100000.0)
+        fwd_pkts_per_sec = min(float(self.fwd_pkts) / rate_duration_sec, 100000.0)
+        bwd_pkts_per_sec = min(float(self.bwd_pkts) / rate_duration_sec, 100000.0)
 
-        fwd_iat_tot = float(sum(self.fwd_iats))
-        bwd_iat_tot = float(sum(self.bwd_iats))
+        # IATs — O(1) via _OnlineStats.get_stats()
+        flow_iat_min, flow_iat_max, flow_iat_mean, flow_iat_std, _ = self.flow_iat_stats.get_stats()
+        fwd_iat_min, fwd_iat_max, fwd_iat_mean, fwd_iat_std, _ = self.fwd_iat_stats.get_stats()
+        bwd_iat_min, bwd_iat_max, bwd_iat_mean, bwd_iat_std, _ = self.bwd_iat_stats.get_stats()
 
-        # Active & Idle
-        active_min, active_max, active_mean, active_std, _ = self._stats(self.active_times)
-        idle_min, idle_max, idle_mean, idle_std, _ = self._stats(self.idle_times)
+        fwd_iat_tot = float(self.fwd_iat_stats.sum_val)
+        bwd_iat_tot = float(self.bwd_iat_stats.sum_val)
+
+        # Active & Idle — O(1) via _OnlineStats.get_stats()
+        active_min, active_max, active_mean, active_std, _ = self.active_stats.get_stats()
+        idle_min, idle_max, idle_mean, idle_std, _ = self.idle_stats.get_stats()
 
         # Down/Up Ratio
         down_up_ratio = (self.bwd_pkts / self.fwd_pkts) if self.fwd_pkts > 0 else 0.0
@@ -294,3 +348,8 @@ class Flow:
         }
 
         return features
+
+    @property
+    def avg_pkt_length(self) -> float:
+        """Average packet length across all packets in the flow (O(1))."""
+        return float(self.all_len_stats._mean) if self.all_len_stats.n > 0 else 0.0

@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-primary: #090D13;
+    --bg-sidebar: #070B12;
+    --bg-surface: #10141C;
+    --bg-card: #121720;
+    --bg-card-elevated: #161B25;
+    --border: #202735;
+    --border-hover: #303A4A;
+
+    --text-primary: #F4F7FB;
+    --text-secondary: #9AA4B2;
+    --text-muted: #667085;
+
+    --accent-cyan: #62E8F7;
+    --accent-purple: #A78BFA;
+    --accent-magenta: #EC5BCB;
+    --accent-blue: #60A5FA;
+
+    --status-normal: #35D07F;
+    --status-warning: #F5B84B;
+    --status-danger: #FF5C6C;
+    --status-critical: #FF3B5C;
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: #1C2432;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2D394E;
+}
+
+/* Accent Gradients & Soft Glows */
+.gradient-accent-btn {
+  background: linear-gradient(135deg, rgba(98, 232, 247, 0.9) 0%, rgba(167, 139, 250, 0.9) 100%);
+  color: #070B12;
+  font-weight: 600;
+  box-shadow: 0 0 16px rgba(98, 232, 247, 0.25);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gradient-accent-btn:hover {
+  background: linear-gradient(135deg, #62E8F7 0%, #A78BFA 100%);
+  box-shadow: 0 0 24px rgba(98, 232, 247, 0.4);
+  transform: translateY(-1px);
+}
+
+.nav-active-gradient {
+  background: linear-gradient(90deg, rgba(98, 232, 247, 0.12) 0%, rgba(167, 139, 250, 0.06) 100%);
+  border-right: 2px solid var(--accent-cyan);
+  box-shadow: inset 0 0 12px rgba(98, 232, 247, 0.08);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 16px rgba(98, 232, 247, 0.2);
+}
+
+.glow-purple {
+  box-shadow: 0 0 16px rgba(167, 139, 250, 0.2);
+}
+
+.glow-green {
+  box-shadow: 0 0 12px rgba(53, 208, 127, 0.3);
+}
+
+.glow-red {
+  box-shadow: 0 0 14px rgba(255, 92, 108, 0.35);
+}
