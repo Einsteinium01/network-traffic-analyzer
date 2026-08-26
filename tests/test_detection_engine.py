@@ -16,7 +16,12 @@ def test_detection_engine_initialization():
     assert not engine.is_running()
 
 
-def test_process_single_packet():
+def test_process_packet_updates_flow_table():
+    """
+    process_packet is a capture-thread callback: it updates raw counters and the
+    flow table and returns None. XGBoost is NOT called here — inference happens
+    in the flow-sampler thread. This test pins that contract.
+    """
     engine = DetectionEngine()
 
     pkt = {
@@ -33,10 +38,50 @@ def test_process_single_packet():
 
     result = engine.process_packet(pkt)
 
-    assert "prediction" in result
+    assert result is None  # fast callback, no inference on the capture thread
+    assert engine.stats["total_packets"] == 1
+    assert engine.stats["total_bytes"] == 512
+    assert len(engine.extractor.active_flows) == 1
+
+
+def test_sampler_predicts_established_flow():
+    """
+    An established (non-probe) flow with >= 2 packets is classified by XGBoost
+    during a sampler cycle, and the result is delivered to alert listeners with
+    the standard result-dict shape.
+    """
+    engine = DetectionEngine()
+    results = []
+    engine.register_alert_listener(results.append)
+
+    now = time.time()
+    # SYN, SYN-ACK, then pushed data — a real session, not a scan probe.
+    engine.process_packet({
+        "src_ip": "192.168.1.50", "dst_ip": "8.8.8.8",
+        "src_port": 54321, "dst_port": 443, "protocol": "TCP",
+        "timestamp": now, "length": 74, "header_len": 40,
+        "tcp_flags": {"SYN": True},
+    })
+    engine.process_packet({
+        "src_ip": "8.8.8.8", "dst_ip": "192.168.1.50",
+        "src_port": 443, "dst_port": 54321, "protocol": "TCP",
+        "timestamp": now + 0.01, "length": 74, "header_len": 40,
+        "tcp_flags": {"SYN": True, "ACK": True},
+    })
+    engine.process_packet({
+        "src_ip": "192.168.1.50", "dst_ip": "8.8.8.8",
+        "src_port": 54321, "dst_port": 443, "protocol": "TCP",
+        "timestamp": now + 0.02, "length": 512, "header_len": 32,
+        "tcp_flags": {"ACK": True, "PSH": True},
+    })
+
+    engine._sample_and_predict_flows()
+
+    assert len(results) == 1
+    result = results[0]
     assert result["prediction"] in ["BENIGN", "ATTACK"]
-    assert "confidence_pct" in result
     assert 0.0 <= result["confidence_pct"] <= 100.0
+    assert result["detector"] == "xgboost"
     assert "attack_type" in result
     assert "id" in result
 

@@ -36,6 +36,7 @@ import psutil
 
 from packet_capture.sniffer import PacketSniffer
 from feature_extraction.extractor import FeatureExtractor
+from feature_extraction.scan_detector import ScanDetector
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,23 @@ logger = logging.getLogger(__name__)
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_MODEL_PATH = ROOT / "models" / "model.pkl"
 DEFAULT_FEATS_PATH = ROOT / "models" / "feature_columns.pkl"
+
+# Scan-detection defaults are read from config/settings.py when available so
+# they can be tuned via environment variables, with literal fallbacks so the
+# engine still constructs cleanly in a bare test environment.
+try:
+    from config import settings as _cfg
+    _SCAN_ENABLED = _cfg.SCAN_DETECTION_ENABLED
+    _SCAN_PORT_FANOUT = _cfg.SCAN_PORT_FANOUT_THRESHOLD
+    _SCAN_HOST_FANOUT = _cfg.SCAN_HOST_FANOUT_THRESHOLD
+    _SCAN_MAX_PROBE_PKTS = _cfg.SCAN_MAX_PROBE_PACKETS
+    _SCAN_COOLDOWN = _cfg.SCAN_ALERT_COOLDOWN_SECONDS
+except Exception:  # pragma: no cover - config import is best-effort
+    _SCAN_ENABLED = True
+    _SCAN_PORT_FANOUT = 15
+    _SCAN_HOST_FANOUT = 15
+    _SCAN_MAX_PROBE_PKTS = 2
+    _SCAN_COOLDOWN = 30.0
 
 
 class DetectionEngine:
@@ -56,6 +74,11 @@ class DetectionEngine:
         model_path: Optional[pathlib.Path] = None,
         feature_cols_path: Optional[pathlib.Path] = None,
         max_history: int = 1000,
+        scan_detection: bool = _SCAN_ENABLED,
+        scan_port_fanout: int = _SCAN_PORT_FANOUT,
+        scan_host_fanout: int = _SCAN_HOST_FANOUT,
+        scan_max_probe_packets: int = _SCAN_MAX_PROBE_PKTS,
+        scan_cooldown_seconds: float = _SCAN_COOLDOWN,
     ):
         """
         Initialize DetectionEngine.
@@ -63,6 +86,11 @@ class DetectionEngine:
         :param model_path: Path to models/model.pkl
         :param feature_cols_path: Path to models/feature_columns.pkl
         :param max_history: Max number of recent packets and alerts to hold in memory
+        :param scan_detection: Enable the heuristic PortScan aggregator alongside ML.
+        :param scan_port_fanout: distinct dst ports per source that flag a vertical scan.
+        :param scan_host_fanout: distinct dst hosts per source that flag a horizontal sweep.
+        :param scan_max_probe_packets: a flow above this packet count is not a probe.
+        :param scan_cooldown_seconds: min gap between scan alerts for the same source.
         """
         self.model_path = model_path or DEFAULT_MODEL_PATH
         self.feature_cols_path = feature_cols_path or DEFAULT_FEATS_PATH
@@ -72,6 +100,18 @@ class DetectionEngine:
         self.model = self._load_model()
         self.extractor = FeatureExtractor(feature_cols_path=self.feature_cols_path)
         self._warmup_model()
+
+        # Heuristic scan aggregator (runs inside the flow sampler, not per packet).
+        self.scan_detector: Optional[ScanDetector] = (
+            ScanDetector(
+                port_fanout_threshold=scan_port_fanout,
+                host_fanout_threshold=scan_host_fanout,
+                max_probe_packets=scan_max_probe_packets,
+                cooldown_seconds=scan_cooldown_seconds,
+            )
+            if scan_detection
+            else None
+        )
 
         # Sniffer Instance
         self.sniffer: Optional[PacketSniffer] = None
@@ -206,7 +246,14 @@ class DetectionEngine:
 
     def _sample_and_predict_flows(self) -> None:
         """
-        One sampling cycle: flush expired flows + predict on all eligible active flows.
+        One sampling cycle:
+          - Flush expired flows and predict on the established (non-probe) ones.
+          - Predict on active flows with >= 2 packets that are not probes.
+          - Aggregate unestablished SYN probe flows into PortScan detections.
+
+        Unestablished single-packet / SYN-only "probe" flows are deliberately
+        NOT sent to XGBoost — their CICIDS2017 features are degenerate and the
+        model scores them BENIGN. They are handled only by the scan aggregator.
         """
         now = time.time()
 
@@ -216,15 +263,22 @@ class DetectionEngine:
             # Snapshot active flow keys + references for prediction below
             active_snapshot = list(self.extractor.active_flows.items())
 
-        # Predict on expired flows immediately (they won't be seen again)
+        scan_on = self.scan_detector is not None
+
+        # Predict on expired flows immediately (they won't be seen again),
+        # except probe flows which are routed to the scan aggregator instead.
         for flow, _feat_dict in expired_flows:
             flow_key = (flow.src_ip, flow.src_port, flow.dst_ip, flow.dst_port, flow.protocol)
-            self._predict_flow(flow, flow_key, now, is_expired=True)
+            if not (scan_on and self.scan_detector.is_probe(flow)):
+                self._predict_flow(flow, flow_key, now, is_expired=True)
             # Remove stale prediction timestamp to avoid leaking memory
             self._flow_last_predicted.pop(flow_key, None)
 
         # ── Step 2: Sample active flows that haven't been predicted recently ──
         for flow_key, flow in active_snapshot:
+            # Probe flows are handled by the scan aggregator, never by XGBoost.
+            if scan_on and self.scan_detector.is_probe(flow):
+                continue
             last_predicted = self._flow_last_predicted.get(flow_key, 0.0)
             if (now - last_predicted) >= self._sampler_interval:
                 # Only predict on flows with at least 2 packets (meaningful features)
@@ -237,6 +291,14 @@ class DetectionEngine:
         stale_keys = [k for k in self._flow_last_predicted if k not in active_keys]
         for k in stale_keys:
             del self._flow_last_predicted[k]
+
+        # ── Step 3: Aggregate SYN probes into PortScan detections ────────────
+        # Runs over every flow visible this cycle (active + just expired). This
+        # is aggregation, not per-flow inference, and stays within the 5s cadence.
+        if scan_on:
+            all_flows = [f for f, _ in expired_flows] + [f for _, f in active_snapshot]
+            for detection in self.scan_detector.evaluate(all_flows, now):
+                self._emit_scan_detection(detection, now)
 
     def _predict_flow(
         self,
@@ -298,6 +360,7 @@ class DetectionEngine:
             "confidence": confidence,
             "confidence_pct": confidence_pct,
             "attack_type": attack_type,
+            "detector": "xgboost",
             "is_simulated": False,
             "flow_packets": flow.fwd_pkts + flow.bwd_pkts,
             "flow_expired": is_expired,
@@ -319,6 +382,58 @@ class DetectionEngine:
                 listener(result)
             except Exception as e:
                 logger.error(f"Error in alert listener: {e}")
+
+    def _emit_scan_detection(self, detection: Dict[str, Any], now: float) -> None:
+        """
+        Turn a ScanDetector observation into a standard alert result and
+        broadcast it through the same path as ML detections (stats, alert
+        history, and SocketIO listeners). Called only from the sampler thread.
+        """
+        ports = detection["distinct_ports"]
+        hosts = detection["distinct_hosts"]
+        confidence = float(detection["confidence"])
+
+        result = {
+            "id": f"scan-{int(now * 1000)}-{np.random.randint(100, 999)}",
+            "timestamp": now,
+            "timestamp_str": datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-3],
+            "src_ip": detection["src_ip"],
+            "dst_ip": detection["dst_ip"],
+            "src_port": 0,
+            "dst_port": detection.get("dst_port", 0),
+            "protocol": "TCP",
+            "length": 0,
+            "prediction": "ATTACK",
+            "is_attack": True,
+            "confidence": confidence,
+            "confidence_pct": round(confidence * 100.0, 2),
+            "attack_type": detection["attack_type"],
+            "detector": "heuristic-scan",
+            "scan_type": detection.get("scan_type"),
+            "distinct_ports": ports,
+            "distinct_hosts": hosts,
+            "is_simulated": False,
+            "flow_packets": detection["probe_count"],
+            "flow_expired": False,
+        }
+
+        logger.info(
+            "PortScan detected: src=%s hit %d ports across %d host(s) "
+            "(%d probes, conf=%.0f%%)",
+            result["src_ip"], ports, hosts, detection["probe_count"], confidence * 100.0,
+        )
+
+        with self._lock:
+            self.stats["attack_packets"] += 1
+            self.recent_alerts.append(result)
+            self.recent_packets.append(result)
+            self._update_threat_level()
+
+        for listener in self.alert_listeners:
+            try:
+                listener(result)
+            except Exception as e:
+                logger.error(f"Error in scan alert listener: {e}")
 
     def _update_threat_level(self) -> None:
         """Update threat level based on recent attack traffic ratio."""
@@ -404,6 +519,9 @@ class DetectionEngine:
         self.recent_alerts.clear()
         self.extractor.clear()
         self._flow_last_predicted.clear()
+        if self.scan_detector is not None:
+            # Forget cooldown state from any prior monitoring session.
+            self.scan_detector.reset()
 
         # Start flow-sampler thread (periodic XGBoost on active flows)
         self._sampler_stop.clear()
@@ -439,6 +557,16 @@ class DetectionEngine:
         self._sampler_stop.set()
         if self._sampler_thread and self._sampler_thread.is_alive():
             self._sampler_thread.join(timeout=self._sampler_interval + 1.0)
+
+        # Final sweep: the sampler wakes only every _sampler_interval seconds, so
+        # a short-lived scan can finish between ticks and leave its probe flows
+        # still active (never expired) when monitoring stops. Run one last cycle
+        # so those flows reach the scan aggregator instead of being dropped.
+        try:
+            self._sample_and_predict_flows()
+        except Exception as e:
+            logger.error(f"Final flow sweep error: {e}")
+
         logger.info("DetectionEngine stopped.")
 
 

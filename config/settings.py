@@ -96,6 +96,36 @@ ALERT_CONFIDENCE_THRESHOLD = float(os.getenv("ALERT_CONFIDENCE_THRESHOLD", "0.70
 BENIGN_LABEL = "BENIGN"
 
 # ---------------------------------------------------------------------------
+# Scan / PortScan heuristic detection (Phase 5 — complements the ML layer)
+# ---------------------------------------------------------------------------
+# Rapid port scans are made of many short-lived SYN "probe" flows that each hold
+# only 1-2 packets. Such flows have degenerate CICIDS2017 features (zero
+# duration, no IAT, no window size), so the flow-level ML model classifies them
+# as BENIGN. Rather than fabricate features or run per-packet inference, a
+# lightweight aggregator runs inside the existing 5-second flow sampler: it
+# groups unestablished SYN probes by source IP and raises ONE PortScan alert
+# when a source fans out across many distinct destination ports (vertical scan)
+# or many distinct destination hosts (horizontal sweep) within the window.
+SCAN_DETECTION_ENABLED = os.getenv("SCAN_DETECTION_ENABLED", "true").lower() == "true"
+
+# Distinct destination ports a single source must probe (SYN, unestablished)
+# before it is flagged as a vertical port scan.
+SCAN_PORT_FANOUT_THRESHOLD = int(os.getenv("SCAN_PORT_FANOUT_THRESHOLD", "15"))
+
+# Distinct destination hosts a single source must probe on before it is flagged
+# as a horizontal sweep.
+SCAN_HOST_FANOUT_THRESHOLD = int(os.getenv("SCAN_HOST_FANOUT_THRESHOLD", "15"))
+
+# A flow counts as a "probe" only if it holds at most this many packets. A real
+# TCP session completes a 3-way handshake and exceeds this quickly, so normal
+# traffic is naturally excluded.
+SCAN_MAX_PROBE_PACKETS = int(os.getenv("SCAN_MAX_PROBE_PACKETS", "2"))
+
+# After a source triggers a scan alert, suppress further alerts for it for this
+# many seconds so a sustained scan does not spam the dashboard.
+SCAN_ALERT_COOLDOWN_SECONDS = float(os.getenv("SCAN_ALERT_COOLDOWN_SECONDS", "30"))
+
+# ---------------------------------------------------------------------------
 # Machine learning (Phase 2)
 # ---------------------------------------------------------------------------
 TEST_SIZE = 0.2          # Fraction of the dataset held back for evaluation.

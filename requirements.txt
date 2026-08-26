@@ -11,6 +11,7 @@ simple-websocket==1.0.0     # WebSocket transport used by Flask-SocketIO in thre
 
 # --- Packet capture --------------------------------------------------------
 scapy==2.5.0                # Sniffs live packets and parses TCP/UDP/ICMP headers
+psutil==7.2.2               # Reads true NIC throughput/packet counters in the detection engine
 
 # --- Machine learning ------------------------------------------------------
 scikit-learn==1.5.1         # Random Forest / Decision Tree + evaluation metrics
