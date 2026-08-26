@@ -7,7 +7,7 @@ import NetworkVisPlaceholder from '../components/NetworkVisPlaceholder';
 import SecurityFeedPlaceholder from '../components/SecurityFeedPlaceholder';
 
 export default function DashboardPage() {
-  const { isMonitoring, captureMode, selectedInterface, stats, toggleMonitoring, isLoading, error } = useMonitoring();
+  const { isMonitoring, captureMode, selectedInterface, stats, recentPackets, toggleMonitoring, isLoading, error } = useMonitoring();
 
   // Dynamic throughput formatting (Single true rate)
   const bytesPerSec = stats.bytes_per_second || 0;
@@ -28,6 +28,17 @@ export default function DashboardPage() {
   const ppsStr = stats.packets_per_second ? stats.packets_per_second.toLocaleString() : '0';
   const normalPct = stats.normal_pct !== undefined ? stats.normal_pct : 100;
   const attackPct = stats.attack_pct !== undefined ? stats.attack_pct : 0;
+
+  // MODEL CONFIDENCE — mean of the real per-prediction confidence_pct carried on
+  // each XGBoost / heuristic-scan result streamed over Socket.IO ('packet' events).
+  // When no predictions have arrived yet, show a neutral placeholder ('—') rather
+  // than a fabricated number.
+  const confidenceSamples = recentPackets.filter((p) => typeof p.confidence_pct === 'number');
+  const avgConfidence = confidenceSamples.length
+    ? confidenceSamples.reduce((sum, p) => sum + p.confidence_pct, 0) / confidenceSamples.length
+    : null;
+  const confidenceStr = avgConfidence !== null ? `${avgConfidence.toFixed(1)}%` : '—';
+  const confidencePct = avgConfidence !== null ? avgConfidence : 0;
 
   return (
     <div className="h-full flex flex-col justify-between space-y-3 max-h-full overflow-hidden">
@@ -145,16 +156,16 @@ export default function DashboardPage() {
         />
         <CircularMetric
           label="DETECTION RATE"
-          value="96.8%"
-          subtext="Model classification performance"
-          percentage={96.8}
+          value={`${attackPct}%`}
+          subtext="Share of traffic flagged as attacks"
+          percentage={attackPct}
           color="purple"
         />
         <CircularMetric
           label="MODEL CONFIDENCE"
-          value="94.2%"
+          value={confidenceStr}
           subtext="Average prediction confidence"
-          percentage={94.2}
+          percentage={confidencePct}
           color="magenta"
         />
       </div>

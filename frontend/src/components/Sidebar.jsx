@@ -11,8 +11,13 @@ import {
   Server,
   Shield,
 } from 'lucide-react';
+import { useMonitoring } from '../context/MonitoringContext';
 
 export default function Sidebar({ activeTab, setActiveTab }) {
+  const { stats, isMonitoring } = useMonitoring();
+  // Real current threat count — same source as the "THREATS DETECTED" KPI card.
+  const threatCount = stats.attack_packets || 0;
+
   const navGroups = [
     {
       group: 'OVERVIEW',
@@ -24,7 +29,7 @@ export default function Sidebar({ activeTab, setActiveTab }) {
     {
       group: 'SECURITY',
       items: [
-        { id: 'threats', label: 'Threats', icon: ShieldAlert, badge: '27' },
+        { id: 'threats', label: 'Threats', icon: ShieldAlert, badge: threatCount > 0 ? String(threatCount) : null },
         { id: 'flows', label: 'Network Flows', icon: GitBranch },
         { id: 'analytics', label: 'Analytics', icon: ChartNoAxesCombined },
       ],
@@ -113,8 +118,8 @@ export default function Sidebar({ activeTab, setActiveTab }) {
 
         <div className="flex items-center justify-between px-3 py-2 text-xs text-[#667085]">
           <div className="flex items-center gap-2">
-            <Server className="w-3.5 h-3.5 text-[#35D07F]" />
-            <span>Engine Active</span>
+            <Server className={`w-3.5 h-3.5 ${isMonitoring ? 'text-[#35D07F]' : 'text-[#667085]'}`} />
+            <span>{isMonitoring ? 'Engine Active' : 'Engine Idle'}</span>
           </div>
           <span className="text-[10px] font-mono text-[#667085]">v1.0.0</span>
         </div>

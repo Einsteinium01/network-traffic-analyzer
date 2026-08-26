@@ -12,7 +12,7 @@ export default function NetworkVisPlaceholder() {
     : bpsVal >= 1024
     ? `${(bpsVal / 1024).toFixed(1)} KB/s`
     : `${bpsVal.toFixed(0)} B/s`;
-  const activeFlows = stats.total_packets ? Math.min(stats.total_packets, 84) : 0;
+  const activeFlows = stats.active_flows !== undefined ? stats.active_flows.toLocaleString() : '0';
 
   return (
     <div className="bg-[#121720] border border-[#202735] rounded-[16px] p-4 flex flex-col justify-between relative overflow-hidden h-full min-h-[260px]">
