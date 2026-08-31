@@ -30,6 +30,21 @@ import time
 from typing import Dict, Any, Tuple, Optional
 
 
+# ── Rate-feature bounds (derived from the cleaned CICIDS2017 training data) ──
+# CICFlowMeter emits per-second rates as (bytes|packets) / (flow duration in
+# seconds). Zero-duration flows therefore become +Inf in the raw CSVs, and
+# models/prepare_dataset.py DROPS those rows — so the model was trained only on
+# finite rates. The observed finite maxima in the cleaned parquet are ~4.0e6
+# packets/s and ~2.07e9 bytes/s. Live rates are capped at that envelope so a
+# degenerate near-zero-duration flow never feeds the model a value larger than
+# anything it saw in training, and the duration is floored at CICFlowMeter's own
+# microsecond timestamp resolution instead of the previous 1-second window
+# (which understated real short-flow rates by up to ~10,000x).
+_RATE_MIN_DURATION_SEC = 1e-6          # CICFlowMeter timestamp resolution (1 µs)
+_FLOW_BYTES_PER_SEC_CAP = 2.1e9        # ~ training max 2.071e9 bytes/s
+_FLOW_PKTS_PER_SEC_CAP = 4.0e6         # training max 4.0e6 packets/s
+
+
 class _OnlineStats:
     """
     Welford's online algorithm for incremental mean, variance, min, max, sum.
@@ -143,11 +158,16 @@ class Flow:
         self.current_active_start: float = ts
         self.idle_threshold: float = 1.0  # 1 second threshold for idle gap
 
-        # Window sizes & seg sizes
-        self.init_win_fwd: int = 0
-        self.init_win_bwd: int = 0
+        # Window sizes & seg sizes.
+        # Init_Win_bytes_* use -1 as CICFlowMeter's "no TCP window observed"
+        # sentinel; the first TCP packet in each direction overwrites it (a real
+        # window of 0 is a valid TCP zero-window and is kept). min_seg_size_forward
+        # stays 0 until the first forward packet, then tracks the minimum forward
+        # L4 header ("segment") size.
+        self.init_win_fwd: int = -1
+        self.init_win_bwd: int = -1
         self.act_data_pkt_fwd: int = 0
-        self.min_seg_size_fwd: int = 32
+        self.min_seg_size_fwd: int = 0
 
         # Add the initial packet
         self.add_packet(first_pkt)
@@ -166,9 +186,25 @@ class Flow:
         ts = pkt.get("timestamp", time.time())
         length = pkt.get("length", 60)
         hdr_len = pkt.get("header_len", 20)
+        is_tcp = pkt.get("protocol") == "TCP"
 
-        # Flow-level IAT (microseconds)
-        if self.last_seen > 0:
+        # True L4 payload length — the basis CICFlowMeter uses for every packet
+        # length statistic. Prefer the value the parser derived from the IP
+        # total-length field (immune to Ethernet minimum-frame padding); fall
+        # back to a best-effort frame-minus-header estimate for capture paths
+        # that do not supply it.
+        payload_len = pkt.get("payload_len")
+        if payload_len is None:
+            payload_len = max(0, length - hdr_len)
+        payload_len = float(payload_len)
+
+        # Packets already in the flow BEFORE this one. The first packet (added
+        # from __init__) has no predecessor, so it must not record a spurious
+        # zero flow-IAT — flow IAT is the gap between *consecutive* packets.
+        prior_pkts = self.fwd_pkts + self.bwd_pkts
+
+        # Flow-level IAT (microseconds) — only once a previous packet exists.
+        if prior_pkts > 0:
             flow_iat = (ts - self.last_seen) * 1e6
             if flow_iat >= 0:
                 self.flow_iat_stats.add(flow_iat)
@@ -184,14 +220,22 @@ class Flow:
                     self.current_active_start = ts
 
         self.last_seen = max(self.last_seen, ts)
-        self.all_len_stats.add(float(length))
+        self.all_len_stats.add(payload_len)
 
         is_fwd = self.is_forward(pkt)
 
         if is_fwd:
             self.fwd_pkts += 1
-            self.fwd_len_stats.add(float(length))
+            self.fwd_len_stats.add(payload_len)
             self.fwd_header_len += hdr_len
+
+            # Minimum forward L4 header ("segment") size observed in this flow.
+            if hdr_len > 0 and (self.min_seg_size_fwd == 0 or hdr_len < self.min_seg_size_fwd):
+                self.min_seg_size_fwd = hdr_len
+
+            # Initial forward TCP window — first forward TCP packet only.
+            if self.init_win_fwd == -1 and is_tcp and "init_win" in pkt:
+                self.init_win_fwd = int(pkt["init_win"])
 
             if self.fwd_last_seen is not None:
                 fwd_iat = (ts - self.fwd_last_seen) * 1e6
@@ -199,15 +243,18 @@ class Flow:
                     self.fwd_iat_stats.add(fwd_iat)
             self.fwd_last_seen = ts
 
-            # Payload packet counter
-            payload_len = max(0, length - hdr_len)
+            # Count forward packets carrying an actual L4 payload.
             if payload_len > 0:
                 self.act_data_pkt_fwd += 1
 
         else:  # Backward direction
             self.bwd_pkts += 1
-            self.bwd_len_stats.add(float(length))
+            self.bwd_len_stats.add(payload_len)
             self.bwd_header_len += hdr_len
+
+            # Initial backward TCP window — first backward TCP packet only.
+            if self.init_win_bwd == -1 and is_tcp and "init_win" in pkt:
+                self.init_win_bwd = int(pkt["init_win"])
 
             if self.bwd_last_seen is not None:
                 bwd_iat = (ts - self.bwd_last_seen) * 1e6
@@ -245,18 +292,17 @@ class Flow:
         tot_bytes = tot_fwd_bytes + tot_bwd_bytes
         tot_pkts = float(self.fwd_pkts + self.bwd_pkts)
 
-        # TASK 5: Prevent zero-duration single packet rate explosion (1,000,000 pkts/s)
-        # For a single-packet flow (duration = 0), use a minimum 1.0 second window for rate calculation
-        if tot_pkts <= 1.0 or raw_duration_sec <= 0.0001:
-            rate_duration_sec = max(raw_duration_sec, 1.0)
-        else:
-            rate_duration_sec = raw_duration_sec
-
-        # Rates (bounded and physically realistic)
-        flow_bytes_per_sec = min(tot_bytes / rate_duration_sec, 1e8)
-        flow_pkts_per_sec = min(tot_pkts / rate_duration_sec, 100000.0)
-        fwd_pkts_per_sec = min(float(self.fwd_pkts) / rate_duration_sec, 100000.0)
-        bwd_pkts_per_sec = min(float(self.bwd_pkts) / rate_duration_sec, 100000.0)
+        # Rates — CICFlowMeter computes (bytes|packets) / (flow duration in
+        # seconds). Use the REAL duration so live values match the training
+        # magnitudes; floor the denominator at the 1 µs timestamp resolution so a
+        # zero-duration flow (which CICFlowMeter emits as +Inf and prepare_dataset
+        # drops) maps to the largest in-distribution value instead of Inf; and cap
+        # at the cleaned-training envelope so we never exceed what the model saw.
+        rate_duration_sec = max(raw_duration_sec, _RATE_MIN_DURATION_SEC)
+        flow_bytes_per_sec = min(tot_bytes / rate_duration_sec, _FLOW_BYTES_PER_SEC_CAP)
+        flow_pkts_per_sec = min(tot_pkts / rate_duration_sec, _FLOW_PKTS_PER_SEC_CAP)
+        fwd_pkts_per_sec = min(float(self.fwd_pkts) / rate_duration_sec, _FLOW_PKTS_PER_SEC_CAP)
+        bwd_pkts_per_sec = min(float(self.bwd_pkts) / rate_duration_sec, _FLOW_PKTS_PER_SEC_CAP)
 
         # IATs — O(1) via _OnlineStats.get_stats()
         flow_iat_min, flow_iat_max, flow_iat_mean, flow_iat_std, _ = self.flow_iat_stats.get_stats()
@@ -272,6 +318,15 @@ class Flow:
 
         # Down/Up Ratio
         down_up_ratio = (self.bwd_pkts / self.fwd_pkts) if self.fwd_pkts > 0 else 0.0
+
+        # CICFlowMeter's "Average Packet Size" is Packet Length Mean * (N+1)/N,
+        # an exact, reproducible off-by-one in its running mean (verified against
+        # 100% of the cleaned training rows). N is the total packet count and the
+        # mean is over L4 payload lengths.
+        if tot_pkts > 0:
+            avg_pkt_size = all_len_mean * (tot_pkts + 1.0) / tot_pkts
+        else:
+            avg_pkt_size = 0.0
 
         # Construct exact 70-feature dictionary
         features = {
@@ -325,7 +380,7 @@ class Flow:
             "CWE Flag Count": float(self.flag_counts["CWE"]),
             "ECE Flag Count": float(self.flag_counts["ECE"]),
             "Down/Up Ratio": float(down_up_ratio),
-            "Average Packet Size": all_len_mean,
+            "Average Packet Size": avg_pkt_size,
             "Avg Fwd Segment Size": fwd_len_mean,
             "Avg Bwd Segment Size": bwd_len_mean,
             "Fwd Header Length.1": float(self.fwd_header_len),

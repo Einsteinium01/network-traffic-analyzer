@@ -110,6 +110,8 @@ def parse_transport_header(protocol: str, payload: bytes) -> Dict[str, Any]:
             "ACK": bool(flags_byte & 0x10),
             "URG": bool(flags_byte & 0x20),
         }
+        info["data_offset"] = ((tcph[4] >> 4) & 0x0F) * 4   # TCP header length (bytes)
+        info["window"] = tcph[6]                            # TCP receive window (Init_Win basis)
 
     elif protocol == "UDP" and len(payload) >= 8:
         udph = struct.unpack("!HHHH", payload[:8])

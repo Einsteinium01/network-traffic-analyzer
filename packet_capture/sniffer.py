@@ -448,6 +448,7 @@ class PacketSniffer:
                 ttl = 64
                 flags_dict = None
                 window_size = 0
+                payload_len = 0
 
                 if eth_type == 0x0800:  # IPv4
                     if len(raw_data) < offset + 20:
@@ -487,6 +488,15 @@ class PacketSniffer:
                         proto_str = "ICMP"
                         hdr_len = 8
 
+                    # True L4 payload length — the basis CICFlowMeter uses for all
+                    # packet-length statistics. Derive from the IP total-length field
+                    # (immune to Ethernet minimum-frame padding); fall back to the
+                    # captured frame size only for TSO/GSO frames where total_len == 0.
+                    if total_len > 0 and (total_len - ihl) >= hdr_len:
+                        payload_len = total_len - ihl - hdr_len
+                    else:
+                        payload_len = max(0, orig_len - l4_offset - hdr_len)
+
                 elif eth_type == 0x86DD:  # IPv6
                     if len(raw_data) < offset + 40:
                         continue
@@ -519,6 +529,11 @@ class PacketSniffer:
                             src_port, dst_port = struct.unpack_from('>HH', raw_data, l4_offset)
                             hdr_len = 8
 
+                    # IPv6 payload-length field (bytes after the 40-byte base header)
+                    # minus the L4 header gives the true L4 payload length.
+                    ip6_plen = struct.unpack_from('>H', raw_data, offset + 4)[0]
+                    payload_len = max(0, ip6_plen - hdr_len)
+
                 if not src_ip or not dst_ip:
                     continue
 
@@ -532,6 +547,7 @@ class PacketSniffer:
                     "protocol": proto_str,
                     "protocol_num": proto_num,
                     "length": orig_len,
+                    "payload_len": payload_len,
                     "header_len": hdr_len,
                     "ttl": ttl,
                     "tcp_flags": flags_dict,
@@ -587,11 +603,15 @@ class PacketSniffer:
                 src_port = 0
                 dst_port = 0
                 tcp_flags = None
+                init_win = 0
+                payload_len = 0
 
                 if scapy_pkt.haslayer(scapy.TCP):
                     tcp_layer = scapy_pkt[scapy.TCP]
                     src_port = tcp_layer.sport
                     dst_port = tcp_layer.dport
+                    init_win = int(getattr(tcp_layer, "window", 0) or 0)
+                    payload_len = len(tcp_layer.payload)
                     tcp_flags = {
                         "FIN": "F" in tcp_layer.flags,
                         "SYN": "S" in tcp_layer.flags,
@@ -604,6 +624,7 @@ class PacketSniffer:
                     udp_layer = scapy_pkt[scapy.UDP]
                     src_port = udp_layer.sport
                     dst_port = udp_layer.dport
+                    payload_len = len(udp_layer.payload)
 
                 now = time.time()
                 pkt_dict = {
@@ -616,9 +637,11 @@ class PacketSniffer:
                     "protocol": proto_name,
                     "protocol_num": proto_num,
                     "length": len(scapy_pkt),
+                    "payload_len": payload_len,
                     "header_len": header_len,
                     "ttl": ttl,
                     "tcp_flags": tcp_flags,
+                    "init_win": init_win,
                     "raw_bytes": bytes(scapy_pkt),
                     "simulated": False,
                 }
@@ -668,6 +691,11 @@ class PacketSniffer:
                 transport_info = parse_transport_header(ip_info["protocol"], ip_info["payload"])
                 now = time.time()
 
+                # True L4 payload length from IP total length minus IP + L4 headers
+                # (data_offset accounts for TCP options; falls back to minimum sizes).
+                _l4 = transport_info.get("data_offset") or {"TCP": 20, "UDP": 8, "ICMP": 8}.get(ip_info["protocol"], 0)
+                payload_len = max(0, ip_info["total_length"] - ip_info["ihl"] - _l4)
+
                 pkt_dict = {
                     "timestamp": now,
                     "timestamp_str": datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -678,9 +706,11 @@ class PacketSniffer:
                     "protocol": ip_info["protocol"],
                     "protocol_num": ip_info["protocol_num"],
                     "length": len(raw_data),
+                    "payload_len": payload_len,
                     "header_len": ip_info["ihl"],
                     "ttl": ip_info["ttl"],
                     "tcp_flags": transport_info["tcp_flags"],
+                    "init_win": transport_info.get("window", 0),
                     "raw_bytes": raw_data,
                     "simulated": False,
                 }
@@ -755,9 +785,11 @@ class PacketSniffer:
                 "protocol": proto,
                 "protocol_num": 6 if proto == "TCP" else (17 if proto == "UDP" else 1),
                 "length": length,
+                "payload_len": max(0, length - 20),
                 "header_len": 20,
                 "ttl": 64,
                 "tcp_flags": tcp_flags,
+                "init_win": 8192 if proto == "TCP" else 0,
                 "simulated": True,
             }
 
