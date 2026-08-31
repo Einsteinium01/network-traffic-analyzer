@@ -3,7 +3,8 @@ import { Play, Square, Activity, Network, ShieldAlert, ShieldCheck } from 'lucid
 import { useMonitoring } from '../context/MonitoringContext';
 import KpiCard from '../components/KpiCard';
 import CircularMetric from '../components/CircularMetric';
-import NetworkVisPlaceholder from '../components/NetworkVisPlaceholder';
+import LiveTrafficChart from '../components/LiveTrafficChart';
+import TopActiveFlows from '../components/TopActiveFlows';
 import SecurityFeedPlaceholder from '../components/SecurityFeedPlaceholder';
 
 export default function DashboardPage() {
@@ -59,10 +60,10 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="h-full flex flex-col justify-between space-y-3 max-h-full overflow-hidden">
+    <div className="h-full flex flex-col justify-between space-y-2.5 max-h-full overflow-hidden">
       {/* Error Alert Banner if Backend connection fails */}
       {error && (
-        <div className="px-3 py-2 bg-[#FF3B5C]/15 border border-[#FF3B5C]/30 text-[#FF5C6C] rounded-lg text-xs flex items-center justify-between flex-shrink-0">
+        <div className="px-3 py-1.5 bg-[#FF3B5C]/15 border border-[#FF3B5C]/30 text-[#FF5C6C] rounded-lg text-xs flex items-center justify-between flex-shrink-0">
           <span>{error}</span>
         </div>
       )}
@@ -121,9 +122,8 @@ export default function DashboardPage() {
         </div>
       </div>
 
-
       {/* Row 1: 4 KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 flex-shrink-0">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 flex-shrink-0">
         <KpiCard
           label="TOTAL PACKETS"
           value={totalPacketsStr}
@@ -154,10 +154,13 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Row 2: Central Network Visualization (2 cols) + Security Feed (1 col) */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5 flex-1 min-h-0">
-        <div className="lg:col-span-2 h-full min-h-0">
-          <NetworkVisPlaceholder />
+      {/* Row 2: Real Live Traffic Chart + Top Active Flows (2 cols) + Security Feed (1 col) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 flex-1 min-h-0">
+        <div className="lg:col-span-2 h-full min-h-0 flex flex-col gap-2.5">
+          <div className="flex-1 min-h-0">
+            <LiveTrafficChart />
+          </div>
+          <TopActiveFlows />
         </div>
         <div className="lg:col-span-1 h-full min-h-0">
           <SecurityFeedPlaceholder />
@@ -165,7 +168,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Row 3: 3 Circular Metric Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 flex-shrink-0">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 flex-shrink-0">
         <CircularMetric
           label="PACKETS / SEC"
           value={ppsStr}

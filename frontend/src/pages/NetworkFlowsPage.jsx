@@ -3,11 +3,15 @@ import {
   GitBranch,
   Search,
   RefreshCw,
+  Network,
+  Laptop,
+  Cpu,
 } from 'lucide-react';
+
 import { useMonitoring } from '../context/MonitoringContext';
 
 export default function NetworkFlowsPage() {
-  const { flows, isMonitoring, fetchFlows } = useMonitoring();
+  const { flows, stats, isMonitoring, activeInterface, selectedInterface, fetchFlows } = useMonitoring();
 
   const [searchFilter, setSearchFilter] = useState('');
   const [protoFilter, setProtoFilter] = useState('ALL');
@@ -36,6 +40,17 @@ export default function NetworkFlowsPage() {
     return `${b} B`;
   };
 
+  // Extract unique remote destination endpoints from active flows
+  const remoteEndpoints = Array.from(new Set(flows.map((f) => f.dst_ip))).slice(0, 3);
+  const pps = stats.packets_per_second ? stats.packets_per_second.toLocaleString() : '0';
+  const bytesPerSec = stats.bytes_per_second || 0;
+  const trafficRateStr =
+    bytesPerSec >= 1024 * 1024
+      ? (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s'
+      : bytesPerSec >= 1024
+      ? (bytesPerSec / 1024).toFixed(1) + ' KB/s'
+      : bytesPerSec.toFixed(0) + ' B/s';
+
   return (
     <div className="h-full flex flex-col space-y-3 max-h-full overflow-hidden">
       {/* Header */}
@@ -60,6 +75,79 @@ export default function NetworkFlowsPage() {
           <RefreshCw className="w-3.5 h-3.5 text-[#62E8F7]" />
           <span>REFRESH FLOWS</span>
         </button>
+      </div>
+
+      {/* Data-Driven Active Flow Topology Visualization */}
+      <div className="bg-[#121720] border border-[#202735] rounded-xl p-3.5 flex flex-col justify-between relative overflow-hidden flex-shrink-0">
+        <div className="flex items-center justify-between z-10 mb-2">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-semibold text-[#F4F7FB] flex items-center gap-1.5">
+              <Network className="w-3.5 h-3.5 text-[#62E8F7]" />
+              Active Flow Topology
+            </h3>
+            <span className="px-1.5 py-0.2 text-[8px] font-mono text-[#62E8F7] bg-[#62E8F7]/10 rounded border border-[#62E8F7]/20">
+              DATA-DRIVEN
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 text-[10px] font-mono">
+            <span className="text-[#9AA4B2]">{trafficRateStr}</span>
+            <span className="text-[#667085]">|</span>
+            <span className="text-[#62E8F7]">{pps} PPS</span>
+            <span className="text-[#667085]">|</span>
+            <span className="text-[#A78BFA]">{flows.length} Flows</span>
+          </div>
+        </div>
+
+        {/* Nodes and Flow Lines */}
+        <div className="relative py-2 px-4 flex items-center justify-between">
+          {/* Remote Endpoints Node */}
+          <div className="flex flex-col items-center gap-1 z-10">
+            <div className="w-10 h-10 rounded-xl bg-[#161B25] border border-[#303A4A] flex items-center justify-center text-[#60A5FA] shadow-md">
+              <Network className="w-4 h-4" />
+            </div>
+            <span className="text-[9px] font-mono font-medium text-[#9AA4B2]">REMOTE TARGETS</span>
+            <div className="text-[8px] font-mono text-[#667085] max-w-[100px] truncate text-center">
+              {remoteEndpoints.length > 0 ? remoteEndpoints.join(', ') : 'Internet Gateways'}
+            </div>
+          </div>
+
+          {/* Connection Line 1 */}
+          <div className="flex-1 px-4 relative flex items-center justify-center">
+            <div className={`w-full h-[2px] ${isMonitoring ? 'bg-gradient-to-r from-[#60A5FA]/40 via-[#62E8F7]/60 to-[#35D07F]/40' : 'bg-[#202735]'} relative`}>
+              {isMonitoring && (
+                <div className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-[#62E8F7] glow-cyan animate-ping" />
+              )}
+            </div>
+          </div>
+
+          {/* Local Host Node */}
+          <div className="flex flex-col items-center gap-1 z-10">
+            <div className={`w-11 h-11 rounded-xl bg-[#161B25] border-2 ${isMonitoring ? 'border-[#62E8F7]/40 glow-cyan' : 'border-[#202735]'} flex items-center justify-center text-[#62E8F7]`}>
+              <Laptop className="w-5 h-5" />
+            </div>
+            <span className="text-[9px] font-mono font-semibold text-[#F4F7FB]">LOCALHOST</span>
+            <span className="text-[8px] font-mono text-[#62E8F7]">{activeInterface || selectedInterface || 'Auto'}</span>
+          </div>
+
+          {/* Connection Line 2 */}
+          <div className="flex-1 px-4 relative flex items-center justify-center">
+            <div className={`w-full h-[2px] ${isMonitoring ? 'bg-gradient-to-r from-[#35D07F]/40 via-[#A78BFA]/60 to-[#EC5BCB]/40' : 'bg-[#202735]'} relative`}>
+              {isMonitoring && (
+                <div className="absolute top-1/2 -translate-y-1/2 right-3 w-2 h-2 rounded-full bg-[#A78BFA] glow-purple animate-pulse" />
+              )}
+            </div>
+          </div>
+
+          {/* XGBoost Feature Engine Node */}
+          <div className="flex flex-col items-center gap-1 z-10">
+            <div className={`w-10 h-10 rounded-xl bg-[#161B25] border ${isMonitoring ? 'border-[#A78BFA]/40 glow-purple' : 'border-[#202735]'} flex items-center justify-center text-[#A78BFA]`}>
+              <Cpu className="w-4 h-4" />
+            </div>
+            <span className="text-[9px] font-mono font-medium text-[#A78BFA]">WELFORD + XGBOOST</span>
+            <span className="text-[8px] font-mono text-[#667085]">5.0s Sweep</span>
+          </div>
+        </div>
       </div>
 
       {/* Flow KPI Cards (Section 33 of design.md) */}
@@ -94,7 +182,7 @@ export default function NetworkFlowsPage() {
       </div>
 
       {/* Filter Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 bg-[#121720] border border-[#202735] rounded-xl p-2.5 flex-shrink-0">
+      <div className="flex flex-wrap items-center justify-between gap-2.5 bg-[#121720] border border-[#202735] rounded-xl p-2 flex-shrink-0">
         <div className="flex items-center gap-1 text-[11px]">
           <span className="text-[10px] font-mono text-[#667085] uppercase mr-1">Proto:</span>
           {['ALL', 'TCP', 'UDP'].map((proto) => (
@@ -143,7 +231,7 @@ export default function NetworkFlowsPage() {
             <tbody className="divide-y divide-[#202735]/60 text-[11px]">
               {filteredFlows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-16 text-center text-[#667085]">
+                  <td colSpan={8} className="py-12 text-center text-[#667085]">
                     {isMonitoring
                       ? 'No active flows matching filter.'
                       : 'Monitoring is offline. Click "START MONITORING" on the Dashboard to aggregate network flows.'}

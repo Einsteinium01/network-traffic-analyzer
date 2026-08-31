@@ -41,6 +41,7 @@ export function MonitoringProvider({ children }) {
   const [alerts, setAlerts] = useState([]);
   const [flows, setFlows] = useState([]);
   const [modelInfo, setModelInfo] = useState(null);
+  const [trafficHistory, setTrafficHistory] = useState([]);
   const [securityEvents, setSecurityEvents] = useState([
     {
       id: 'init-1',
@@ -57,6 +58,25 @@ export function MonitoringProvider({ children }) {
   // Packet and alert buffers for high-frequency Socket.IO batching
   const packetBufferRef = useRef([]);
   const alertBufferRef = useRef([]);
+
+  // Helper: record a traffic data point for the 60s time-series chart
+  const recordTrafficPoint = useCallback((data) => {
+    const now = Date.now();
+    setTrafficHistory((prev) => {
+      const point = {
+        t: now,
+        pps: data.packets_per_second || 0,
+        bps: data.bytes_per_second || 0,
+        flows: data.active_flows || 0,
+        tcp: data.tcp_count || 0,
+        udp: data.udp_count || 0,
+        attacks: data.attack_packets || 0,
+      };
+      const cutoff = now - 65000; // keep ~65s of history
+      const trimmed = prev.filter((p) => p.t > cutoff);
+      return [...trimmed, point];
+    });
+  }, []);
 
   // Save user preferences
   const handleSetSelectedInterface = (iface) => {
@@ -134,12 +154,13 @@ export function MonitoringProvider({ children }) {
       }
 
       setStats((prev) => ({ ...prev, ...data }));
+      recordTrafficPoint(data);
     } catch (err) {
       console.warn('Backend offline:', err.message);
       setMonitoringState('ERROR');
       setError('Backend server offline or unreachable at http://localhost:5000');
     }
-  }, []);
+  }, [recordTrafficPoint]);
 
   // Initial load
   useEffect(() => {
@@ -183,6 +204,7 @@ export function MonitoringProvider({ children }) {
       }
 
       setStats((prev) => ({ ...prev, ...statusData }));
+      recordTrafficPoint(statusData);
     };
 
     socketService.on('packet', handlePacket);
@@ -228,7 +250,8 @@ export function MonitoringProvider({ children }) {
       socketService.off('alert', handleAlert);
       socketService.off('status', handleStatus);
     };
-  }, []);
+  }, [recordTrafficPoint]);
+
 
   // Explicit Start Monitoring Handler
   const startMonitoring = async () => {
@@ -324,6 +347,7 @@ export function MonitoringProvider({ children }) {
     flows,
     modelInfo,
     securityEvents,
+    trafficHistory,
     error,
     isLoading,
 
