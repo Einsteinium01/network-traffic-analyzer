@@ -3,9 +3,37 @@ import { MonitoringProvider } from './context/MonitoringContext';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import DashboardPage from './pages/DashboardPage';
+import LiveTrafficPage from './pages/LiveTrafficPage';
+import ThreatsPage from './pages/ThreatsPage';
+import NetworkFlowsPage from './pages/NetworkFlowsPage';
+import AnalyticsPage from './pages/AnalyticsPage';
+import LogsPage from './pages/LogsPage';
+import SettingsPage from './pages/SettingsPage';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
+
+  const renderActiveModule = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return <DashboardPage />;
+      case 'live-traffic':
+        return <LiveTrafficPage />;
+      case 'threats':
+        return <ThreatsPage />;
+      case 'flows':
+        return <NetworkFlowsPage />;
+      case 'analytics':
+        return <AnalyticsPage />;
+      case 'logs':
+        return <LogsPage />;
+      case 'settings':
+      case 'support':
+        return <SettingsPage />;
+      default:
+        return <DashboardPage />;
+    }
+  };
 
   return (
     <MonitoringProvider>
@@ -16,31 +44,15 @@ export default function App() {
         {/* Main Viewport Container */}
         <div className="flex-1 ml-[248px] flex flex-col h-full min-w-0 overflow-hidden">
           {/* Sticky TopBar */}
-          <TopBar />
+          <TopBar setActiveTab={setActiveTab} />
 
-          {/* Dashboard Main Content Canvas */}
+          {/* Main Content Canvas */}
           <main className="flex-1 p-4 lg:p-5 overflow-hidden flex flex-col min-h-0">
-            {activeTab === 'dashboard' ? (
-              <DashboardPage />
-            ) : (
-              <div className="bg-[#121720] border border-[#202735] rounded-[16px] p-8 text-center my-auto max-w-lg mx-auto">
-                <h2 className="text-xl font-bold text-[#F4F7FB] capitalize">
-                  {activeTab.replace('-', ' ')} Module
-                </h2>
-                <p className="text-xs text-[#9AA4B2] mt-2 leading-relaxed">
-                  The application shell and dashboard composition are active. This section view will be connected in subsequent steps.
-                </p>
-                <button
-                  onClick={() => setActiveTab('dashboard')}
-                  className="mt-6 px-4 py-2 bg-[#161B25] border border-[#303A4A] rounded-xl text-xs font-semibold text-[#62E8F7] hover:bg-[#202735] transition-all"
-                >
-                  Return to Dashboard Overview
-                </button>
-              </div>
-            )}
+            {renderActiveModule()}
           </main>
         </div>
       </div>
     </MonitoringProvider>
   );
 }
+

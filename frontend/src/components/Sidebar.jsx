@@ -14,9 +14,10 @@ import {
 import { useMonitoring } from '../context/MonitoringContext';
 
 export default function Sidebar({ activeTab, setActiveTab }) {
-  const { stats, isMonitoring } = useMonitoring();
-  // Real current threat count — same source as the "THREATS DETECTED" KPI card.
-  const threatCount = stats.attack_packets || 0;
+  const { stats, alerts, isMonitoring } = useMonitoring();
+  // Real current threat count from live alert collection and engine stats
+  const threatCount = alerts.length > 0 ? alerts.length : stats.attack_packets || 0;
+
 
   const navGroups = [
     {

@@ -7,9 +7,22 @@ import NetworkVisPlaceholder from '../components/NetworkVisPlaceholder';
 import SecurityFeedPlaceholder from '../components/SecurityFeedPlaceholder';
 
 export default function DashboardPage() {
-  const { isMonitoring, captureMode, selectedInterface, stats, recentPackets, toggleMonitoring, isLoading, error } = useMonitoring();
+  const {
+    isMonitoring,
+    activeMode,
+    activeInterface,
+    selectedMode,
+    selectedInterface,
+    stats,
+    recentPackets,
+    startMonitoring,
+    stopMonitoring,
+    monitoringState,
+    isLoading,
+    error,
+  } = useMonitoring();
 
-  // Dynamic throughput formatting (Single true rate)
+  // Dynamic throughput formatting (Single true rate from backend)
   const bytesPerSec = stats.bytes_per_second || 0;
   let trafficRateStr = '0.00 KB/s';
   if (bytesPerSec >= 1024 * 1024) {
@@ -26,19 +39,24 @@ export default function DashboardPage() {
   const activeFlowsStr = stats.active_flows !== undefined ? stats.active_flows.toString() : '0';
 
   const ppsStr = stats.packets_per_second ? stats.packets_per_second.toLocaleString() : '0';
-  const normalPct = stats.normal_pct !== undefined ? stats.normal_pct : 100;
-  const attackPct = stats.attack_pct !== undefined ? stats.attack_pct : 0;
+  const normalPct = stats.total_packets > 0 ? (stats.normal_pct !== undefined ? stats.normal_pct : 100) : 100;
+  const attackPct = stats.total_packets > 0 ? (stats.attack_pct !== undefined ? stats.attack_pct : 0) : 0;
 
-  // MODEL CONFIDENCE — mean of the real per-prediction confidence_pct carried on
-  // each XGBoost / heuristic-scan result streamed over Socket.IO ('packet' events).
-  // When no predictions have arrived yet, show a neutral placeholder ('—') rather
-  // than a fabricated number.
-  const confidenceSamples = recentPackets.filter((p) => typeof p.confidence_pct === 'number');
+  // Real model confidence from streaming predictions
+  const confidenceSamples = recentPackets.filter((p) => typeof p.confidence_pct === 'number' && p.confidence_pct > 0);
   const avgConfidence = confidenceSamples.length
     ? confidenceSamples.reduce((sum, p) => sum + p.confidence_pct, 0) / confidenceSamples.length
     : null;
   const confidenceStr = avgConfidence !== null ? `${avgConfidence.toFixed(1)}%` : '—';
   const confidencePct = avgConfidence !== null ? avgConfidence : 0;
+
+  const handleToggle = () => {
+    if (isMonitoring) {
+      stopMonitoring();
+    } else {
+      startMonitoring();
+    }
+  };
 
   return (
     <div className="h-full flex flex-col justify-between space-y-3 max-h-full overflow-hidden">
@@ -59,17 +77,17 @@ export default function DashboardPage() {
             <span
               className={`px-2.5 py-0.5 rounded-full text-[10px] font-semibold border ${
                 isMonitoring
-                  ? captureMode === 'LIVE'
+                  ? activeMode === 'LIVE'
                     ? 'bg-[#35D07F]/15 border-[#35D07F]/40 text-[#35D07F]'
                     : 'bg-[#FFC043]/15 border-[#FFC043]/40 text-[#FFC043]'
                   : 'bg-[#121720] border-[#202735] text-[#9AA4B2]'
               }`}
             >
               {isMonitoring
-                ? captureMode === 'LIVE'
-                  ? `LIVE: ${selectedInterface || 'Auto'}`
+                ? activeMode === 'LIVE'
+                  ? `LIVE: ${activeInterface || selectedInterface || 'Auto'}`
                   : 'SIMULATION'
-                : 'OFFLINE'}
+                : `TARGET: [${selectedMode}] ${selectedInterface || 'Auto'}`}
             </span>
           </div>
           <p className="text-xs text-[#9AA4B2] mt-0.5">
@@ -80,9 +98,9 @@ export default function DashboardPage() {
         {/* Primary Start / Stop Monitoring Button */}
         <div>
           <button
-            onClick={toggleMonitoring}
+            onClick={handleToggle}
             disabled={isLoading}
-            className={`px-4 py-2 rounded-[10px] text-[11px] font-semibold uppercase tracking-wider flex items-center gap-2 ${
+            className={`px-4 py-2 rounded-[10px] text-[11px] font-semibold uppercase tracking-wider flex items-center gap-2 transition-all ${
               isMonitoring
                 ? 'bg-[#FF3B5C]/15 border border-[#FF3B5C]/40 text-[#FF5C6C] hover:bg-[#FF3B5C]/25 glow-red'
                 : 'gradient-accent-btn'
@@ -91,17 +109,18 @@ export default function DashboardPage() {
             {isMonitoring ? (
               <>
                 <Square className="w-3 h-3 fill-current" />
-                <span>{isLoading ? 'STOPPING...' : '● STOP MONITORING'}</span>
+                <span>{isLoading || monitoringState === 'STOPPING' ? 'STOPPING...' : 'STOP MONITORING'}</span>
               </>
             ) : (
               <>
                 <Play className="w-3 h-3 fill-current" />
-                <span>{isLoading ? 'STARTING...' : 'START MONITORING'}</span>
+                <span>{isLoading || monitoringState === 'STARTING' ? 'STARTING...' : 'START MONITORING'}</span>
               </>
             )}
           </button>
         </div>
       </div>
+
 
       {/* Row 1: 4 KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 flex-shrink-0">

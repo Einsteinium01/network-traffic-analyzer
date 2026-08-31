@@ -133,3 +133,39 @@ def test_405_returns_json(client):
     assert r.status_code == 405
     data = r.get_json()
     assert "error" in data
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/flows, /api/v1/model-info, /api/v1/export/csv
+# ---------------------------------------------------------------------------
+def test_flows_endpoint(client):
+    r = client.get("/api/v1/flows")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert "flows" in data
+    assert "count" in data
+
+
+def test_model_info_endpoint(client):
+    r = client.get("/api/v1/model-info")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["model_type"] == "XGBoost Classifier"
+    assert data["feature_count"] == 70
+    assert "features" in data
+    assert len(data["features"]) == 70
+
+
+def test_export_csv_alerts(client):
+    r = client.get("/api/v1/export/csv?type=alerts")
+    assert r.status_code == 200
+    assert r.headers["Content-Type"].startswith("text/csv")
+    assert "attachment" in r.headers.get("Content-Disposition", "")
+
+
+def test_export_csv_logs(client):
+    r = client.get("/api/v1/export/csv?type=logs")
+    assert r.status_code == 200
+    assert r.headers["Content-Type"].startswith("text/csv")
+    assert "attachment" in r.headers.get("Content-Disposition", "")
+

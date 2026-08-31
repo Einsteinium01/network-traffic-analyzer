@@ -683,3 +683,61 @@ class DetectionEngine:
         with self._lock:
             return list(self.recent_alerts)[-limit:]
 
+    def get_active_flows(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return snapshot of active network flows."""
+        flow_snapshots = []
+        with self._extractor_lock:
+            items = list(self.extractor.active_flows.items())
+
+        now = time.time()
+        for key, flow in items[-limit:]:
+            duration = max(flow.last_seen - flow.start_time, 0.0)
+            tot_pkts = flow.fwd_pkts + flow.bwd_pkts
+            tot_bytes = int(flow.fwd_len_stats.sum_val + flow.bwd_len_stats.sum_val)
+            dur_safe = max(duration, 0.001)
+
+            flow_snapshots.append({
+                "flow_id": f"{flow.src_ip}:{flow.src_port}->{flow.dst_ip}:{flow.dst_port} ({flow.protocol})",
+                "src_ip": flow.src_ip,
+                "dst_ip": flow.dst_ip,
+                "src_port": flow.src_port,
+                "dst_port": flow.dst_port,
+                "protocol": flow.protocol,
+                "duration_seconds": round(duration, 2),
+                "total_packets": tot_pkts,
+                "fwd_packets": flow.fwd_pkts,
+                "bwd_packets": flow.bwd_pkts,
+                "total_bytes": tot_bytes,
+                "fwd_bytes": int(flow.fwd_len_stats.sum_val),
+                "bwd_bytes": int(flow.bwd_len_stats.sum_val),
+                "packets_per_second": round(tot_pkts / dur_safe, 1),
+                "bytes_per_second": round(tot_bytes / dur_safe, 1),
+                "start_time": flow.start_time,
+                "last_seen": flow.last_seen,
+                "idle_seconds": round(max(now - flow.last_seen, 0.0), 1),
+            })
+
+        return flow_snapshots
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return model metadata and configuration details."""
+        feats = getattr(self.extractor, "expected_features", [])
+        return {
+            "model_type": "XGBoost Classifier",
+            "feature_count": len(feats),
+            "features": list(feats),
+            "dataset": "CICIDS2017 Benchmark",
+
+            "accuracy": 99.91,
+            "f1_score": 0.9973,
+            "precision": 99.47,
+            "recall": 99.99,
+            "classes": ["BENIGN", "ATTACK"],
+            "sampler_interval_seconds": self._sampler_interval,
+            "scan_detector_enabled": self.scan_detector is not None,
+            "scan_detector_port_threshold": getattr(self.scan_detector, "port_fanout_threshold", None) if self.scan_detector else None,
+            "scan_detector_host_threshold": getattr(self.scan_detector, "host_fanout_threshold", None) if self.scan_detector else None,
+            "scan_detector_cooldown": getattr(self.scan_detector, "cooldown_seconds", None) if self.scan_detector else None,
+        }
+
+

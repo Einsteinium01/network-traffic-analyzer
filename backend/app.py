@@ -315,6 +315,95 @@ def create_app() -> Flask:
             "packets": packets,
         }), 200
 
+    # ── GET /api/v1/flows ──────────────────────────────────────────────────
+    @app.get("/api/v1/flows")
+    def get_flows() -> Response:
+        """
+        Return active network flows tracked by the feature extractor.
+
+        Query params:
+          limit (int, 1-500, default 100)
+        """
+        limit = _parse_limit(request.args.get("limit", 100), max_val=500)
+        flows = engine.get_active_flows(limit=limit)
+        return jsonify({
+            "count": len(flows),
+            "flows": flows,
+        }), 200
+
+    # ── GET /api/v1/model-info ─────────────────────────────────────────────
+    @app.get("/api/v1/model-info")
+    def get_model_info() -> Response:
+        """Return model specifications, feature metadata, and training stats."""
+        info = engine.get_model_info()
+        return jsonify(info), 200
+
+    # ── GET /api/v1/export/csv ─────────────────────────────────────────────
+    @app.get("/api/v1/export/csv")
+    def export_csv() -> Response:
+        """
+        Export recent detection alerts or packet logs as a CSV file.
+        Query params:
+          type: 'alerts' | 'logs' (default 'alerts')
+          limit: (int, 1-1000, default 500)
+        """
+        export_type = request.args.get("type", "alerts").lower()
+        limit = _parse_limit(request.args.get("limit", 500), max_val=1000)
+
+        import io
+        import csv
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        if export_type == "logs":
+            records = engine.get_recent_packets(limit=limit)
+            headers = ["timestamp", "timestamp_str", "src_ip", "dst_ip", "src_port", "dst_port", "protocol", "length", "prediction", "is_attack", "confidence_pct", "attack_type"]
+            writer.writerow(headers)
+            for r in records:
+                writer.writerow([
+                    r.get("timestamp", ""),
+                    r.get("timestamp_str", ""),
+                    r.get("src_ip", ""),
+                    r.get("dst_ip", ""),
+                    r.get("src_port", ""),
+                    r.get("dst_port", ""),
+                    r.get("protocol", ""),
+                    r.get("length", ""),
+                    r.get("prediction", "BENIGN"),
+                    r.get("is_attack", False),
+                    r.get("confidence_pct", 0),
+                    r.get("attack_type", "BENIGN"),
+                ])
+            filename = f"netintel_logs_{int(time.time())}.csv"
+        else:
+            records = engine.get_alerts(limit=limit)
+            headers = ["timestamp", "timestamp_str", "attack_type", "severity", "src_ip", "dst_ip", "src_port", "dst_port", "protocol", "confidence_pct", "details"]
+            writer.writerow(headers)
+            for r in records:
+                writer.writerow([
+                    r.get("timestamp", ""),
+                    r.get("timestamp_str", ""),
+                    r.get("attack_type", ""),
+                    r.get("severity", "HIGH"),
+                    r.get("src_ip", ""),
+                    r.get("dst_ip", ""),
+                    r.get("src_port", ""),
+                    r.get("dst_port", ""),
+                    r.get("protocol", ""),
+                    r.get("confidence_pct", 0),
+                    r.get("details", ""),
+                ])
+            filename = f"netintel_alerts_{int(time.time())}.csv"
+
+        output.seek(0)
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+
     # ── Error handlers ──────────────────────────────────────────────────────
     @app.errorhandler(404)
     def not_found(_err: Any) -> Response:

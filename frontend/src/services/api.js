@@ -46,6 +46,24 @@ export const apiService = {
     const response = await apiClient.get('/logs', { params: { limit } });
     return response.data;
   },
+
+  // Get active network flows
+  async getFlows(limit = 100) {
+    const response = await apiClient.get('/flows', { params: { limit } });
+    return response.data;
+  },
+
+  // Get model metadata & specifications
+  async getModelInfo() {
+    const response = await apiClient.get('/model-info');
+    return response.data;
+  },
+
+  // Export CSV URL generator
+  getExportCsvUrl(type = 'alerts', limit = 500) {
+    return `${API_BASE_URL}/export/csv?type=${encodeURIComponent(type)}&limit=${limit}`;
+  },
 };
 
 export default apiService;
+

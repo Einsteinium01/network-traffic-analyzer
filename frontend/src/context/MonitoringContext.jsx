@@ -5,9 +5,20 @@ import socketService from '../services/socket';
 const MonitoringContext = createContext(null);
 
 export function MonitoringProvider({ children }) {
+  // User selections (Persist in UI across polling updates)
+  const [selectedInterface, setSelectedInterface] = useState(() => {
+    return localStorage.getItem('netintel_interface') || '';
+  });
+  const [selectedMode, setSelectedMode] = useState(() => {
+    return localStorage.getItem('netintel_mode') || 'LIVE';
+  });
+
+  // Authoritative Backend State
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const [captureMode, setCaptureMode] = useState('LIVE');
-  const [selectedInterface, setSelectedInterface] = useState('');
+  const [activeMode, setActiveMode] = useState('LIVE');
+  const [activeInterface, setActiveInterface] = useState('');
+  const [monitoringState, setMonitoringState] = useState('IDLE'); // 'IDLE' | 'STARTING' | 'ACTIVE' | 'STOPPING' | 'ERROR'
+
   const [interfaces, setInterfaces] = useState([]);
   const [stats, setStats] = useState({
     total_packets: 0,
@@ -20,75 +31,137 @@ export function MonitoringProvider({ children }) {
     packets_per_second: 0.0,
     bytes_per_second: 0.0,
     active_flows: 0,
+    tcp_count: 0,
+    udp_count: 0,
+    icmp_count: 0,
     duration_seconds: 0.0,
   });
+
   const [recentPackets, setRecentPackets] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [flows, setFlows] = useState([]);
+  const [modelInfo, setModelInfo] = useState(null);
   const [securityEvents, setSecurityEvents] = useState([
     {
       id: 'init-1',
-      title: 'Engine Ready',
-      desc: 'Intelligent Network Traffic Analyzer connected',
+      title: 'Engine Standby',
+      desc: 'NetIntel intrusion detection system connected to backend.',
       time: 'Just now',
       type: 'normal',
     },
   ]);
+
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Packet batching buffer
+  // Packet and alert buffers for high-frequency Socket.IO batching
   const packetBufferRef = useRef([]);
   const alertBufferRef = useRef([]);
 
-  // Fetch available network interfaces from backend
+  // Save user preferences
+  const handleSetSelectedInterface = (iface) => {
+    setSelectedInterface(iface);
+    if (iface) {
+      localStorage.setItem('netintel_interface', iface);
+    }
+  };
+
+  const handleSetSelectedMode = (mode) => {
+    const valid = mode === 'SIMULATION' ? 'SIMULATION' : 'LIVE';
+    setSelectedMode(valid);
+    localStorage.setItem('netintel_mode', valid);
+  };
+
+  // Fetch available network interfaces
   const fetchInterfaces = useCallback(async () => {
     try {
       const data = await apiService.getInterfaces();
       const list = data.interfaces || [];
       setInterfaces(list);
 
-      // Auto-select first active UP non-loopback interface if not set
-      if (!selectedInterface && list.length > 0) {
-        const activeUp = list.find((i) => i.status === 'UP' && !i.is_loopback);
-        if (activeUp) {
-          setSelectedInterface(activeUp.name);
-        } else {
-          setSelectedInterface(list[0].name);
+      // Auto-select first active UP non-loopback interface if not yet chosen
+      setSelectedInterface((current) => {
+        if (current && list.some((i) => i.name === current)) {
+          return current;
         }
-      }
+        const activeUp = list.find((i) => i.status === 'UP' && !i.is_loopback);
+        const fallback = activeUp ? activeUp.name : list[0]?.name || 'Auto';
+        localStorage.setItem('netintel_interface', fallback);
+        return fallback;
+      });
     } catch (err) {
       console.warn('Failed to fetch network interfaces:', err.message);
     }
-  }, [selectedInterface]);
+  }, []);
 
-  // Fetch live status from backend
-  const fetchStatus = useCallback(async () => {
+  // Fetch model specifications
+  const fetchModelInfo = useCallback(async () => {
     try {
-      const data = await apiService.getStatus();
-      setIsMonitoring(Boolean(data.is_running));
-      if (data.capture_mode) setCaptureMode(data.capture_mode);
-      if (data.interface) setSelectedInterface(data.interface);
-      if (data.error_message) setError(data.error_message);
-      setStats((prev) => ({ ...prev, ...data }));
+      const data = await apiService.getModelInfo();
+      setModelInfo(data);
     } catch (err) {
-      console.warn('Backend offline:', err.message);
+      console.warn('Failed to fetch model info:', err.message);
     }
   }, []);
 
-  // Fetch initial state on mount
+  // Fetch active flows snapshot
+  const fetchFlows = useCallback(async () => {
+    try {
+      const data = await apiService.getFlows(100);
+      setFlows(data.flows || []);
+    } catch (err) {
+      console.debug('Failed to fetch flows:', err.message);
+    }
+  }, []);
+
+  // Fetch status snapshot from backend
+  const fetchStatus = useCallback(async () => {
+    try {
+      const data = await apiService.getStatus();
+      const running = Boolean(data.is_running);
+      setIsMonitoring(running);
+      if (data.capture_mode) setActiveMode(data.capture_mode);
+      if (data.interface) setActiveInterface(data.interface);
+
+      if (data.error_message) {
+        setError(data.error_message);
+        setMonitoringState('ERROR');
+      } else if (running) {
+        setMonitoringState('ACTIVE');
+        setError(null);
+      } else {
+        setMonitoringState((prev) => (prev === 'STARTING' || prev === 'STOPPING' ? prev : 'IDLE'));
+      }
+
+      setStats((prev) => ({ ...prev, ...data }));
+    } catch (err) {
+      console.warn('Backend offline:', err.message);
+      setMonitoringState('ERROR');
+      setError('Backend server offline or unreachable at http://localhost:5000');
+    }
+  }, []);
+
+  // Initial load
   useEffect(() => {
     fetchInterfaces();
+    fetchModelInfo();
     fetchStatus();
-    const statusInterval = setInterval(fetchStatus, 2000);
-    return () => clearInterval(statusInterval);
-  }, [fetchStatus, fetchInterfaces]);
+    fetchFlows();
 
-  // Connect Socket.IO & handle live streaming events
+    const statusTimer = setInterval(() => {
+      fetchStatus();
+      fetchFlows();
+    }, 2000);
+
+    return () => clearInterval(statusTimer);
+  }, [fetchInterfaces, fetchModelInfo, fetchStatus, fetchFlows]);
+
+  // Socket.IO event subscribers
   useEffect(() => {
     socketService.connect();
 
-    const handlePacket = (packet) => {
-      packetBufferRef.current.push(packet);
+    const handlePacket = (pkt) => {
+      packetBufferRef.current.push(pkt);
     };
 
     const handleAlert = (alertPkt) => {
@@ -96,9 +169,19 @@ export function MonitoringProvider({ children }) {
     };
 
     const handleStatus = (statusData) => {
-      setIsMonitoring(Boolean(statusData.is_running));
-      if (statusData.capture_mode) setCaptureMode(statusData.capture_mode);
-      if (statusData.interface) setSelectedInterface(statusData.interface);
+      const running = Boolean(statusData.is_running);
+      setIsMonitoring(running);
+      if (statusData.capture_mode) setActiveMode(statusData.capture_mode);
+      if (statusData.interface) setActiveInterface(statusData.interface);
+
+      if (statusData.error_message) {
+        setError(statusData.error_message);
+        setMonitoringState('ERROR');
+      } else if (running) {
+        setMonitoringState('ACTIVE');
+        setError(null);
+      }
+
       setStats((prev) => ({ ...prev, ...statusData }));
     };
 
@@ -106,15 +189,15 @@ export function MonitoringProvider({ children }) {
     socketService.on('alert', handleAlert);
     socketService.on('status', handleStatus);
 
-    // Batch UI updates every 300ms for packet and alert feeds
-    const batchInterval = setInterval(() => {
+    // Batch UI updates every 250ms
+    const batchTimer = setInterval(() => {
       if (packetBufferRef.current.length > 0) {
         const newPackets = [...packetBufferRef.current];
         packetBufferRef.current = [];
 
         setRecentPackets((prev) => {
           const combined = [...newPackets, ...prev];
-          return combined.slice(0, 100);
+          return combined.slice(0, 150);
         });
       }
 
@@ -122,113 +205,135 @@ export function MonitoringProvider({ children }) {
         const newAlerts = [...alertBufferRef.current];
         alertBufferRef.current = [];
 
-        setAlerts((prev) => [...newAlerts, ...prev].slice(0, 50));
+        setAlerts((prev) => {
+          const combined = [...newAlerts, ...prev];
+          return combined.slice(0, 100);
+        });
 
-        // Append to timeline security events
         const newEvents = newAlerts.map((a) => ({
           id: a.id || `alert-${Date.now()}-${Math.random()}`,
-          title: `Threat: ${a.attack_type || 'Malicious Activity'}`,
-          desc: `Attack detected from ${a.src_ip} -> ${a.dst_ip} (${a.confidence_pct}% conf)`,
+          title: `Threat: ${a.attack_type || 'Intrusion Alert'}`,
+          desc: `Detected from ${a.src_ip} -> ${a.dst_ip}:${a.dst_port || ''} (${a.confidence_pct || 99}% conf)`,
           time: 'Just now',
           type: 'attack',
         }));
 
-        setSecurityEvents((prev) => [...newEvents, ...prev].slice(0, 20));
+        setSecurityEvents((prev) => [...newEvents, ...prev].slice(0, 30));
       }
-    }, 300);
+    }, 250);
 
     return () => {
-      clearInterval(batchInterval);
+      clearInterval(batchTimer);
       socketService.off('packet', handlePacket);
       socketService.off('alert', handleAlert);
       socketService.off('status', handleStatus);
     };
   }, []);
 
-  // Start monitoring with specified mode & interface
-  const startMonitoringMode = async (requestedMode = captureMode, targetInterface = selectedInterface) => {
+  // Explicit Start Monitoring Handler
+  const startMonitoring = async () => {
     setIsLoading(true);
     setError(null);
+    setMonitoringState('STARTING');
+
     try {
-      const res = await apiService.startMonitoring(requestedMode, targetInterface);
+      const modeToStart = selectedMode || 'LIVE';
+      const ifaceToStart = selectedInterface || null;
+
+      const res = await apiService.startMonitoring(modeToStart, ifaceToStart);
       setIsMonitoring(true);
-      if (res.capture_mode) setCaptureMode(res.capture_mode);
-      if (res.interface) setSelectedInterface(res.interface);
+      setActiveMode(res.capture_mode || modeToStart);
+      setActiveInterface(res.interface || ifaceToStart || 'Auto');
+      setMonitoringState('ACTIVE');
 
       setSecurityEvents((prev) => [
         {
           id: `start-${Date.now()}`,
-          title: `Monitoring Started (${res.capture_mode || requestedMode})`,
-          desc: `Capturing on interface: ${res.interface || targetInterface || 'Auto'}`,
+          title: `Monitoring Active (${res.capture_mode || modeToStart})`,
+          desc: `Capturing on interface: ${res.interface || ifaceToStart || 'Auto'}`,
           time: 'Just now',
           type: 'normal',
         },
         ...prev,
       ]);
+
       await fetchStatus();
+      await fetchFlows();
     } catch (err) {
       console.error('Failed to start monitoring:', err);
-      const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Failed to start packet capture';
+      const msg =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        err.message ||
+        'Failed to start packet capture engine.';
       setError(msg);
       setIsMonitoring(false);
+      setMonitoringState('ERROR');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Stop monitoring action
-  const stopMonitoringMode = async () => {
+  // Explicit Stop Monitoring Handler
+  const stopMonitoring = async () => {
     setIsLoading(true);
-    setError(null);
+    setMonitoringState('STOPPING');
+
     try {
       await apiService.stopMonitoring();
       setIsMonitoring(false);
+      setMonitoringState('IDLE');
+
       setSecurityEvents((prev) => [
         {
           id: `stop-${Date.now()}`,
           title: 'Monitoring Stopped',
-          desc: 'Packet capture paused by operator',
+          desc: 'Packet capture engine cleanly halted by operator.',
           time: 'Just now',
           type: 'warning',
         },
         ...prev,
       ]);
+
       await fetchStatus();
     } catch (err) {
       console.error('Failed to stop monitoring:', err);
-      setError(err.response?.data?.error || 'Failed to stop monitoring');
+      setError(err.response?.data?.error || 'Failed to stop monitoring engine.');
+      setMonitoringState('ERROR');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Toggle monitoring button handler
-  const toggleMonitoring = async () => {
-    if (isMonitoring) {
-      await stopMonitoringMode();
-    } else {
-      await startMonitoringMode(captureMode, selectedInterface);
-    }
-  };
-
   const value = {
-    isMonitoring,
-    captureMode,
-    setCaptureMode,
+    // User selections (persisted)
     selectedInterface,
-    setSelectedInterface,
+    setSelectedInterface: handleSetSelectedInterface,
+    selectedMode,
+    setSelectedMode: handleSetSelectedMode,
+
+    // Backend live status
+    isMonitoring,
+    activeMode,
+    activeInterface,
+    monitoringState,
     interfaces,
     stats,
     recentPackets,
     alerts,
+    flows,
+    modelInfo,
     securityEvents,
     error,
     isLoading,
-    startMonitoringMode,
-    stopMonitoringMode,
-    toggleMonitoring,
+
+    // Lifecycle Actions
+    startMonitoring,
+    stopMonitoring,
     fetchStatus,
     fetchInterfaces,
+    fetchFlows,
+    fetchModelInfo,
   };
 
   return <MonitoringContext.Provider value={value}>{children}</MonitoringContext.Provider>;
@@ -241,3 +346,4 @@ export function useMonitoring() {
   }
   return context;
 }
+
