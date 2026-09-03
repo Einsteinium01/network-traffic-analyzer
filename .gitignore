@@ -50,3 +50,6 @@ htmlcov/
 #files for agent
 DESIGN.md 
 PROJECT_SPEC.md 
+
+# Hidden directories
+.*/ 
