@@ -179,6 +179,11 @@ Use comments only where useful.
 
 Split code into modules.
 
+<<<<<<< HEAD
+=======
+Avoid one huge Python file.
+
+>>>>>>> origin/master
 Every function should have a single responsibility.
 
 Use configuration files where appropriate.
@@ -349,7 +354,11 @@ Use Flask-SocketIO for real-time updates.
 
 # Phase 7 – Frontend
 
+<<<<<<< HEAD
 Create a professional dashboard use @DESIGN.md file in the directory for the design of the frontend.
+=======
+Create a professional dashboard.
+>>>>>>> origin/master
 
 Sections
 
@@ -475,6 +484,14 @@ Whenever you generate code:
 
 Explain
 
+<<<<<<< HEAD
+=======
+1. Why this code exists.
+
+2. How it works.
+
+3. Which file it belongs in.
+>>>>>>> origin/master
 
 4. How to run it.
 
@@ -482,6 +499,13 @@ Explain
 
 6. Expected output.
 
+<<<<<<< HEAD
+=======
+Never assume I already know the concept.
+
+Teach as if mentoring a student.
+
+>>>>>>> origin/master
 ---
 
 # Output Rules
