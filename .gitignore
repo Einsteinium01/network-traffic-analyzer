@@ -50,6 +50,7 @@ htmlcov/
 #files for agent
 DESIGN.md 
 PROJECT_SPEC.md 
+skills-lock.json
 
 # Hidden directories
 .*/ 
