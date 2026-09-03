@@ -14,6 +14,7 @@ env/
 dataset/*.csv
 dataset/**/*.csv
 dataset/*.pcap
+!dataset/.gitkeep
 models/*.pkl
 database/*.db
 database/*.sqlite3
